@@ -1,132 +1,171 @@
-/** Grid Shift: deterministic, browser-local simulation. Money is illustrative GBP. */
-export const VERSION = 2;
-export const HOURS = 12;
-export const START_HOUR = 8;
-export const SHORTAGE_PRICE = 2500;
-export const WIND_CAPACITY = 280;
-export const SOLAR_CAPACITY = 300;
-export const FLEET = Object.freeze([
-  {id:'N1', name:'Northbank', type:'Nuclear', capacity:240, rate:14, fixed:1000, startup:10000, change:2400, co2:0.012, color:'#b9a1ff'},
-  {id:'C1', name:'Ironbridge', type:'Coal', capacity:180, rate:34, fixed:550, startup:4500, change:1600, co2:0.92, color:'#a7b6c5'},
-  {id:'C2', name:'Moorfield', type:'Coal', capacity:140, rate:39, fixed:420, startup:3400, change:1300, co2:0.96, color:'#a7b6c5'},
-  {id:'G1', name:'Riverside', type:'Gas', capacity:180, rate:67, fixed:180, startup:1000, change:800, co2:0.36, color:'#fbbf24'},
-  {id:'G2', name:'Eastgate', type:'Gas', capacity:120, rate:90, fixed:90, startup:600, change:600, co2:0.43, color:'#fbbf24'},
-  {id:'G3', name:'Hilltop', type:'Gas', capacity:90, rate:115, fixed:50, startup:350, change:450, co2:0.49, color:'#fbbf24'},
-].map(Object.freeze));
+/** Grid Shift physics and accounting: deterministic, browser-local. Money is illustrative GBP. */
+import {HOURS, FLEET, SHORTAGE, DEFAULT_RULES, PRESET_LOOKAHEAD} from './config.mjs';
+
 export const STATES = 1 << FLEET.length;
-export const bits = m => FLEET.map((u,i)=>(m>>i)&1);
-export const capacity = m => FLEET.reduce((s,u,i)=>s+((m>>i)&1)*u.capacity,0);
-export const changeCost = (m,p) => FLEET.reduce((s,u,i)=>s+(((m^p)>>i)&1)*u.change,0);
-export const startupCost = (m,p) => FLEET.reduce((s,u,i)=>s+(((m&~p)>>i)&1)*u.startup,0);
-const clamp = (v,a,b) => Math.max(a,Math.min(b,v));
-export function hash(text) {let h=2166136261; for(const c of String(text)) {h^=c.charCodeAt(0);h=Math.imul(h,16777619);}return h>>>0;}
-export function rng(seed) {let a=hash(seed);return ()=>{a+=0x6D2B79F5;let t=a;t=Math.imul(t^(t>>>15),t|1);t^=t+Math.imul(t^(t>>>7),t|61);return ((t^(t>>>14))>>>0)/4294967296;};}
-const noise = r => (r()+r()+r()+r()-2)*1.73;
-const round = v => Math.round(v*10)/10;
-export function makeForecast(seed) {
-  const r=rng(`${seed}:forecast:v2`); const phase=r()*4, windBase=100+r()*75, cloud=.65+r()*.3, demandScale=.93+r()*.14;
-  const hours=Array.from({length:HOURS},(_,index)=>{
-    const h=START_HOUR+index;
-    const morning=105*Math.exp(-(((h-8)/2.5)**2)), evening=240*Math.exp(-(((h-18.5)/3.1)**2));
-    const demand=round((455+morning+evening+30*Math.sin((h-5)/24*Math.PI*2))*demandScale);
-    const wind=round(clamp(windBase+48*Math.sin((h+phase)/24*Math.PI*2)+20*Math.cos(h/9),30,250));
-    const solar=round(Math.max(0,Math.sin((h-6)/12*Math.PI))*SOLAR_CAPACITY*cloud);
-    return {hour:index,clockHour:h,demand,wind,solar};
-  });
-  return Object.freeze({seed:String(seed),hours:Object.freeze(hours.map(Object.freeze))});
+export const ALL_UNITS = STATES - 1;
+const typeMask = type => FLEET.reduce((m, u, i) => (u.type === type ? m | (1 << i) : m), 0);
+export const NUCLEAR = typeMask('Nuclear');
+export const COAL = typeMask('Coal');
+export const GAS = typeMask('Gas');
+
+export const isOn = (mask, i) => ((mask >> i) & 1) === 1;
+export const validMask = m => Number.isInteger(m) && m >= 0 && m < STATES;
+export const capacity = m => FLEET.reduce((s, u, i) => s + (isOn(m, i) ? u.capacity : 0), 0);
+export const changeCost = (m, p) => FLEET.reduce((s, u, i) => s + (isOn(m ^ p, i) ? u.change : 0), 0);
+export const startupCost = (m, p) => FLEET.reduce((s, u, i) => s + (isOn(m & ~p, i) ? u.startup : 0), 0);
+export const unitNames = mask => FLEET.filter((u, i) => isOn(mask, i)).map(u => u.id).join(' + ') || 'None';
+export const availableUnits = (rules = DEFAULT_RULES) => ALL_UNITS & ~(rules.disabled ?? 0);
+
+/** Hours of notice unit i needs during the shift (Infinity = fixed for the shift). */
+export function leadTime(i, rules = DEFAULT_RULES) {
+  const lead = FLEET[i].lead;
+  if (lead === null) return Infinity;
+  return rules.leadTimes === false ? 0 : lead;
 }
-/** Separate streams: forecast, hidden realization, and each planner scenario never share RNG state. */
-function weatherPath(forecast, stream, history=[]) {
-  const r=rng(stream); const current=history.length-1;
-  let ed=0, ew=0, es=0;
-  if(current>=0){const a=history[current],f=forecast.hours[current];ed=a.demand-f.demand;ew=a.wind-f.wind;es=f.solar>20?(a.solar/f.solar-1)*75:0;}
-  else {ed=noise(r)*18;ew=noise(r)*32;es=noise(r)*20;}
-  const biasD=current<0?noise(r)*12:0,biasW=current<0?noise(r)*22:0;
-  return forecast.hours.map((f,h)=>{
-    if(h<=current)return {...history[h]};
-    ed=.82*ed+noise(r)*12+biasD*.18;ew=.88*ew+noise(r)*23+biasW*.12;es=.85*es+noise(r)*11;
-    return {hour:h,clockHour:START_HOUR+h,demand:round(clamp(f.demand+ed,300,950)),wind:round(clamp(f.wind+ew,0,WIND_CAPACITY)),solar:round(clamp(f.solar*(1+es/75),0,SOLAR_CAPACITY))};
-  });
-}
-export const makeRealization = (forecast) => weatherPath(forecast,`${forecast.seed}:hidden-realization:v2`);
-export const makePlanningScenarios = (forecast,history=[],count=12) => Array.from({length:count},(_,i)=>weatherPath(forecast,`${forecast.seed}:planner:${history.length}:${i}:v2`,history));
-/** Renewables first, then ascending variable cost; no conventional minimum output. */
+/** Earliest hour unit i can be changed when hour h is live. */
+export const editableFrom = (i, h, rules) => h + leadTime(i, rules);
+/** Bits that may no longer change at hour t when hour h is live. */
+export const lockedBits = (t, h, rules) => FLEET.reduce((m, u, i) => (t < editableFrom(i, h, rules) ? m | (1 << i) : m), 0);
+
+/** Renewables first, then ascending variable cost. Tripped units produce nothing. */
 export function dispatch(mask, actual) {
-  if(!Number.isInteger(mask)||mask<0||mask>=STATES)throw Error('Invalid commitment mask');
-  for(const k of ['demand','wind','solar'])if(!Number.isFinite(actual[k])||actual[k]<0)throw Error('Invalid conditions');
-  const available=actual.wind+actual.solar, renewable=Math.min(actual.demand,available);
-  const windUsed=available?renewable*actual.wind/available:0,solarUsed=renewable-windUsed;
-  let remaining=actual.demand-renewable, running=0, emissions=0;
-  const outputs=FLEET.map((u,i)=>{
-    if(!((mask>>i)&1))return 0;
-    const p=Math.min(remaining,u.capacity);remaining-=p;running+=u.fixed+p*u.rate;emissions+=p*u.co2;return p;
+  if (!validMask(mask)) throw Error('Invalid commitment mask');
+  for (const k of ['demand', 'wind', 'solar']) if (!Number.isFinite(actual[k]) || actual[k] < 0) throw Error('Invalid conditions');
+  const effective = mask & ~(actual.outage ?? 0);
+  const available = actual.wind + actual.solar, renewable = Math.min(actual.demand, available);
+  const windUsed = available ? renewable * actual.wind / available : 0, solarUsed = renewable - windUsed;
+  let remaining = actual.demand - renewable, running = 0, emissions = 0;
+  const outputs = FLEET.map((u, i) => {
+    if (!isOn(effective, i)) return 0;
+    const p = Math.min(remaining, u.capacity);
+    remaining -= p; running += u.fixed + p * u.rate; emissions += p * u.co2;
+    return p;
   });
-  const shortage=Math.max(0,remaining),conventional=outputs.reduce((s,v)=>s+v,0);
-  return {outputs,windUsed,solarUsed,renewable,conventional,served:renewable+conventional,shortage,curtailment:available-renewable,spare:Math.max(0,capacity(mask)-conventional),running,emissions,penalty:shortage*SHORTAGE_PRICE};
+  const shortage = Math.max(0, remaining), brownout = Math.min(shortage, SHORTAGE.brownoutShare * actual.demand), blackout = shortage - brownout;
+  const conventional = outputs.reduce((s, v) => s + v, 0);
+  return {effective, outputs, windUsed, solarUsed, renewable, conventional, served: renewable + conventional, shortage, brownout, blackout,
+    curtailment: available - renewable, spare: Math.max(0, capacity(effective) - conventional), running, emissions,
+    penalty: brownout * SHORTAGE.brownoutPrice + blackout * SHORTAGE.blackoutPrice};
 }
-export function settle({hour,mask,previousMask=0,planMask,actual}) {
-  const d=dispatch(mask,actual),startup=startupCost(mask,previousMask),adjustment=changeCost(mask,planMask);
-  return {hour,mask,planMask,previousMask,actual:{...actual},...d,startup,adjustment,total:d.running+startup+adjustment+d.penalty};
+
+/** One settled hour. `mask` in the record is what actually ran (tripped units removed). */
+export function settle({hour, mask, previousMask = 0, planMask = mask, actual}) {
+  const d = dispatch(mask, actual), out = actual.outage ?? 0;
+  const startup = startupCost(d.effective, previousMask), adjustment = changeCost(mask & ~out, planMask & ~out);
+  return {hour, ...d, mask: d.effective, requested: mask, planMask, previousMask, actual: {...actual}, startup, adjustment,
+    total: d.running + startup + adjustment + d.penalty};
 }
+
 export function summarize(ledger) {
-  const keys=['running','startup','adjustment','penalty','total','shortage','emissions','curtailment','served','renewable'];
-  return Object.fromEntries(keys.map(k=>[k,ledger.reduce((s,l)=>s+l[k],0)]));
+  const keys = ['running', 'startup', 'adjustment', 'penalty', 'total', 'shortage', 'brownout', 'blackout', 'emissions', 'curtailment', 'served', 'renewable'];
+  return Object.fromEntries(keys.map(k => [k, ledger.reduce((s, l) => s + l[k], 0)]));
 }
-/** Exact dynamic program over 64 commitment states for a finite scenario-average model.
- * Day-ahead is one shared nonanticipative commitment path. Hourly revision treats today's
- * revelation as known and all later hours as conditional scenarios. This is a simulator,
- * not the production ORBIT service, and has no claim to global stochastic optimality.
- */
-export function optimizePlan({forecast,history=[],startHour=0,previousMask=0,submittedPlan=null}) {
-  if(startHour!==Math.max(0,history.length-1)&&!(startHour===0&&history.length===0))throw Error('History must end at the current revealed hour');
-  const scenarios=makePlanningScenarios(forecast,history,12),back=[];
-  let previous=Array(STATES).fill(Infinity);previous[previousMask]=0;
-  for(let h=startHour;h<HOURS;h++){
-    const expected=Array.from({length:STATES},(_,m)=>{
-      const operating=scenarios.reduce((s,path)=>{const d=dispatch(m,path[h]);return s+d.running+d.penalty;},0)/scenarios.length;
-      return operating+(submittedPlan?changeCost(m,submittedPlan[h]):0);
-    });
-    const next=Array(STATES).fill(Infinity),from=new Int16Array(STATES);
-    for(let m=0;m<STATES;m++)for(let p=0;p<STATES;p++){
-      const cost=previous[p]+startupCost(m,p)+expected[m];
-      if(cost<next[m]){next[m]=cost;from[m]=p;}
-    }
-    back.push(from);previous=next;
+
+export function validatePlan(plan, rules = DEFAULT_RULES) {
+  if (!Array.isArray(plan) || plan.length !== HOURS || !plan.every(validMask)) throw Error('Invalid plan');
+  if (plan.some(m => m & ~availableUnits(rules))) throw Error('Invalid plan: unit not in service');
+  if (plan.some(m => (m & NUCLEAR) !== (plan[0] & NUCLEAR))) throw Error('Invalid plan: nuclear runs all shift or not at all');
+}
+
+/** Rejects edits to hours that are inside a unit's notice period. */
+export function checkSchedule(next, current, h, rules = DEFAULT_RULES) {
+  if (!Array.isArray(next) || next.length !== HOURS) throw Error('Invalid schedule');
+  for (let t = h; t < HOURS; t++) {
+    if (!validMask(next[t])) throw Error('Invalid schedule');
+    if (next[t] & ~availableUnits(rules)) throw Error('Unit not in service');
+    if ((next[t] ^ current[t]) & lockedBits(t, h, rules)) throw Error('Locked: that change needs more notice');
   }
-  let best=previous.indexOf(Math.min(...previous));const expectedCost=previous[best],plan=Array(HOURS).fill(0);
-  for(let i=back.length-1;i>=0;i--){plan[startHour+i]=best;best=back[i][best];}
-  return {plan,expectedCost,scenarioCount:scenarios.length};
 }
-/** This policy accepts only the public forecast, revealed prefix and own commitment history.
- * It is deliberately unable to take a realized-day or game-state object as input. */
-export function orbitDecision({forecast,history,submittedPlan,previousMask=0}) {
-  if(!history.length||history.length>HOURS)throw Error('Reveal a valid current hour first');
-  const hour=history.length-1;
-  const solved=optimizePlan({forecast,history,startHour:hour,previousMask,submittedPlan});
-  const mask=solved.plan[hour],planned=submittedPlan[hour],a=history[hour],d=dispatch(mask,a);
-  const net=a.demand-a.wind-a.solar,forecastNet=forecast.hours[hour].demand-forecast.hours[hour].wind-forecast.hours[hour].solar;
-  const changes=FLEET.filter((u,i)=>((mask^planned)>>i)&1).map((u)=>`${u.id} ${mask&(1<<FLEET.indexOf(u))?'on':'off'}`);
-  const reason=`Net demand ${Math.round(net)} MW (${net>=forecastNet?'+':''}${Math.round(net-forecastNet)} vs forecast). ${changes.length?`Changed ${changes.join(', ')} from its submitted plan.`:'Kept its submitted commitment.'} ${Math.round(d.spare)} MW spare.`;
-  return {mask,reason};
+
+/** Switch unit i to `value` from hour `from` until the schedule already had it that way. */
+export function flipRun(schedule, i, from, value) {
+  const next = [...schedule];
+  for (let t = from; t < HOURS && isOn(next[t], i) !== value; t++) next[t] ^= 1 << i;
+  return next;
 }
-export function baselinePlan() {return Array(HOURS).fill(3);}
-/** Public optional player aid: hourly forecast merit order, no scenarios or lookahead. */
-export function forecastPlan(forecast) {
-  let prev=0;
-  return forecast.hours.map(a=>{let best=0,cost=Infinity;for(let m=0;m<STATES;m++){const d=dispatch(m,a),c=d.running+d.penalty+startupCost(m,prev);if(c<cost){cost=c;best=m;}}prev=best;return best;});
+
+/** Hour cost of every mask on one path; with `recourse`, each mask is first patched with the cheapest instant gas. */
+function maskCosts(actual, planMask, allowed, recourse) {
+  const out = actual.outage ?? 0, raw = new Float64Array(STATES).fill(Infinity);
+  for (let m = 0; m < STATES; m++) {
+    if (m & ~allowed) continue;
+    const d = dispatch(m, actual);
+    raw[m] = d.running + d.penalty + (planMask === null ? 0 : changeCost(m & ~out, planMask & ~out));
+  }
+  if (!recourse) return raw;
+  const patched = new Float64Array(raw), gas = GAS & allowed & ~out;
+  for (let m = 0; m < STATES; m++) {
+    if (raw[m] === Infinity) continue;
+    const free = gas & ~m;
+    for (let add = free; add; add = (add - 1) & free) patched[m] = Math.min(patched[m], raw[m | add] + startupCost(add, 0));
+  }
+  return patched;
 }
-/** Hidden data lives inside this session, never passed to either planner. */
-export function createSession(seed) {
-  const forecast=makeForecast(seed),actual=makeRealization(forecast);
-  let humanPlan=null,orbitPlan=null,ledger=[],orbitLedger=[],history=[],orbitActions=[],hour=0;
-  return {
-    forecast,
-    start(plan){if(humanPlan)throw Error('Already started');if(!Array.isArray(plan)||plan.length!==HOURS||plan.some(m=>!Number.isInteger(m)||m<0||m>=STATES))throw Error('Invalid plan');humanPlan=Object.freeze([...plan]);orbitPlan=Object.freeze(optimizePlan({forecast}).plan);history=[{...actual[0]}];return this.view();},
-    view(){return {hour,complete:hour===HOURS,actual:humanPlan&&hour<HOURS?{...actual[hour]}:null,history:history.map(a=>({...a})),humanPlan:humanPlan?[...humanPlan]:null,ledger:ledger.map(l=>({...l,actual:{...l.actual},outputs:[...l.outputs]})),...(hour===HOURS?{orbitPlan:[...orbitPlan],orbitLedger:orbitLedger.map(l=>({...l,actual:{...l.actual},outputs:[...l.outputs]})),orbitActions:[...orbitActions]}:{})};},
-    settle(mask){if(!humanPlan||hour>=HOURS)throw Error('No active hour');const previousMask=ledger.at(-1)?.mask??0,previousOrbit=orbitLedger.at(-1)?.mask??0;
-      const decision=orbitDecision({forecast,history,submittedPlan:orbitPlan,previousMask:previousOrbit});
-      ledger.push(settle({hour,mask,previousMask,planMask:humanPlan[hour],actual:actual[hour]}));
-      orbitLedger.push(settle({hour,mask:decision.mask,previousMask:previousOrbit,planMask:orbitPlan[hour],actual:actual[hour]}));orbitActions.push(decision.reason);
-      hour++;if(hour<HOURS)history.push({...actual[hour]});return this.view();}
-  };
+
+/** Exact DP over the 64 commitment states, averaging hour costs across `paths`.
+ * `fixed[t]` = {bits, value} pins bits at hour t. Plan-change charges apply when `plan` is given.
+ * From hour `recourseFrom` on, each schedule is valued as if gaps on a path will be patched with gas
+ * (a two-stage approximation); earlier hours are already known, so nothing patches them. */
+function dp({paths, from, to = HOURS, previousMask, plan, fixed, allowed, recourseFrom}) {
+  let cost = new Float64Array(STATES).fill(Infinity);
+  cost[previousMask] = 0;
+  const back = [];
+  for (let t = from; t < to; t++) {
+    const stage = new Float64Array(STATES).fill(Infinity), out = paths[0][t].outage ?? 0, outBefore = t > from ? paths[0][t - 1].outage ?? 0 : 0;
+    const perPath = paths.map(p => maskCosts(p[t], plan ? plan[t] : null, allowed, t >= recourseFrom));
+    for (let m = 0; m < STATES; m++) {
+      if (m & ~allowed || (fixed?.[t] && (m & fixed[t].bits) !== fixed[t].value)) continue;
+      stage[m] = perPath.reduce((s, c) => s + c[m], 0) / paths.length;
+    }
+    const next = new Float64Array(STATES).fill(Infinity), via = new Int8Array(STATES);
+    for (let m = 0; m < STATES; m++) {
+      if (stage[m] === Infinity) continue;
+      for (let p = 0; p < STATES; p++) {
+        if (cost[p] === Infinity) continue;
+        const c = cost[p] + startupCost(m & ~out, p & ~outBefore) + stage[m];
+        if (c < next[m]) { next[m] = c; via[m] = p; }
+      }
+    }
+    back.push(via);
+    cost = next;
+  }
+  let best = 0;
+  for (let m = 1; m < STATES; m++) if (cost[m] < cost[best]) best = m;
+  const expectedCost = cost[best], schedule = Array(HOURS).fill(0);
+  for (let i = back.length - 1; i >= 0; i--) { schedule[from + i] = best; best = back[i][best]; }
+  return {schedule, expectedCost};
+}
+
+/** Best schedule for the given paths. At the start of a shift it also chooses whether nuclear runs. */
+export function solve({paths, from = 0, to = HOURS, previousMask = 0, plan = null, fixed = null, rules = DEFAULT_RULES, recourseFrom = Infinity}) {
+  const allowed = availableUnits(rules);
+  if (from > 0 || fixed) return dp({paths, from, to, previousMask, plan, fixed, allowed, recourseFrom});
+  const options = [0, NUCLEAR].filter(n => (n & allowed) === n).map(n =>
+    dp({paths, from, to, previousMask, plan, allowed, recourseFrom, fixed: Array.from({length: HOURS}, () => ({bits: NUCLEAR, value: n}))}));
+  return options.reduce((a, b) => (b.expectedCost < a.expectedCost ? b : a));
+}
+
+/** Starter plans: a simple aid that looks only PRESET_LOOKAHEAD hours ahead at the central forecast plus a margin.
+ * Nuclear is decided once for the shift. No scenarios, no events. */
+export function starterPlan(day, margin = 50, lookahead = PRESET_LOOKAHEAD) {
+  const padded = day.forecast.hours.map(a => ({...a, demand: a.demand + margin}));
+  const n = solve({paths: [padded], rules: day.rules}).schedule[0] & NUCLEAR, plan = [];
+  const fixed = Array.from({length: HOURS}, () => ({bits: NUCLEAR, value: n}));
+  for (let t = 0, prev = 0; t < HOURS; t++) {
+    plan[t] = dp({paths: [padded], from: t, to: Math.min(HOURS, t + lookahead), previousMask: prev, fixed, allowed: availableUnits(day.rules), recourseFrom: Infinity}).schedule[t];
+    prev = plan[t];
+  }
+  return plan;
+}
+
+/** Cheapest set of gas units to add this hour (instant start). Never removes a unit. */
+export function gasCover({mask, actual, previousMask = 0, planMask = mask, rules = DEFAULT_RULES}) {
+  if (dispatch(mask, actual).shortage < 1e-9) return mask;
+  const free = availableUnits(rules) & GAS & ~mask & ~(actual.outage ?? 0);
+  let best = mask, bestCost = settle({hour: 0, mask, previousMask, planMask, actual}).total;
+  for (let add = free; add; add = (add - 1) & free) {
+    const cost = settle({hour: 0, mask: mask | add, previousMask, planMask, actual}).total;
+    if (cost < bestCost - 1e-9) { best = mask | add; bestCost = cost; }
+  }
+  return best;
 }

@@ -1,81 +1,126 @@
-# Grid Shift — command deck edition
+# Grid Shift
 
-A playable browser game about scheduling power generation and responding to uncertain demand and weather. The shift is **08:00–20:00: twelve genuine one-hour decisions**. This edition centres the shift on a demand/generation chart, one-click decisions, weather-driven pauses and a visible city power balance. The underlying twelve-hour commitment model and fair ORBIT comparison are retained.
+A browser game about keeping a city's lights on through a twelve-hour shift (08:00–20:00). You choose which power stations run; the weather, demand and the occasional breakdown don't follow the forecast. You're graded against the best possible shift in hindsight and race an opponent who faces exactly the same day.
 
 ## Play and develop
 
-Open `grid-shift.html` in this project folder directly in a modern browser. All application code, styles and graphics are inlined. No build service, internet connection or external asset is required. Browser storage is optional; a browser that denies it still supports play.
+Open `grid-shift.html` in a modern browser. It is one self-contained file that works offline. Browser storage is optional.
 
-The owning static source is `dist/`:
+The source lives in `dist/` (served as-is in production):
 
 ```sh
-python3 -m http.server 4173 --bind 127.0.0.1 --directory dist
-node --test tests/*.test.mjs
-node scripts/build-local.mjs
+python3 -m http.server 4173 --bind 127.0.0.1 --directory dist   # play the source build
+node --test tests/*.test.mjs                                     # 60 model and interaction tests
+node scripts/balance.mjs 80                                      # simulate 80 days and check the fun targets
+node scripts/build-local.mjs                                     # rebuild grid-shift.html
 ```
 
-The standalone builder writes `grid-shift.html` in this project folder. Hosted identity stays in `.openai/hosting.json` with the existing private Grid Shift project and `dist` directory. Port Shift is a separate project and is untouched. Publication remains subject to the previously reported execution-policy block; no deployment is claimed.
+Every gameplay number lives in `dist/config.mjs`. After changing one, run the balance script and the tests.
 
 ## Deploy to Vercel
 
-Import this repository with the **Root Directory** set to the repository root (leave the field blank). The root `vercel.json` selects the **Other** framework preset, skips the build step, and serves the existing `dist/` directory. No dependencies or environment variables are required.
+Import the repository with the **Root Directory** left blank. The root `vercel.json` selects the **Other** preset, skips the build step and serves `dist/`, whose homepage is `dist/index.html`. No dependencies or environment variables are needed.
 
-The homepage is `dist/index.html`; serving the repository root instead leaves `/` without an index page and causes a 404. For an existing Vercel project, deploy the latest commit on `main` so the configuration takes effect. The Output Directory is `dist`, relative to the repository root.
+## How it plays
 
-## New experience
+**Modes**
+- **Campaign:** ten hand-made days that introduce one mechanic at a time: nuclear and gas, then coal, wind, solar and fog, coal notice, heatwave, plant trip, storm, cup final, and finally everything at once. Each day has a goal (stars, sometimes a medal), and meeting it unlocks the next.
+- **Today's shift:** a date-based code (`DAY-2026-10-16`) so everyone plays the same day.
+- **Free play:** any day code.
 
-- A full-shift stacked generation chart is the main play surface. Nuclear, coal, gas, wind and solar show delivered generation; outlined segments show spare capacity; striped red segments show gaps. Forecast demand is dashed gold, revealed actual demand is solid white. Future columns are faded and hatched. Select a column to inspect it, or return to the live hour.
-- Choose Lean, Balanced (50 MW reserve target), or More reserve (110 MW target), then explicitly commit the schedule. Individual units and copying a mix across all hours remain available under an optional control. The first fresh game uses day code SHIFT-26, an ordinary seeded realization with a recoverable cloud-related shortage. New codes produce different days.
-- **Cover gap** adds capacity while preserving existing units. **Trim cost** searches all 64 states for the cheapest current-hour total with demand met. **Keep reserve** adds capacity for at least 90 MW spare. Buttons preview the full cost difference, including starts and plan deviations. Assist changes can be undone or restored to the submitted mix before settlement. These simple aids do not optimize future costs or use ORBIT's plan.
-- **Run** advances one hour every four seconds. It stops when a new significant forecast error arrives (wind or solar at least 45 MW below forecast, demand at least 40 MW above), an existing weather error worsens by 30 MW, or the current submitted mix leaves a gap. Covered persistent weather does not repeatedly stop the shift. It also checks in after at most three hours. **Pause** and **Step** allow deliberate play; there is no time penalty. Editing, inspection, opening a dialog/tour, leaving the tab, and reload all pause progression. Every callback carries a run generation and hour token; stale or repeated callbacks cannot settle a second hour.
-- The city responds to the actual served fraction. Current alerts describe existing realized conditions; they do not inject extra effects. Both sides still receive exactly the same physical conditions. Results show a cumulative cost race, reliability, and the existing hourly decision replay and full accounting.
-- Quick tour is an approximately 25-second animated, interactive demonstration of the new chart, run/pause, wind-drop recovery, and cost comparison. Pause, step, skip and replay are available. It uses an isolated example with computed dispatch and results; it never writes to the live game or storage. Reduced-motion users start with manual progression and all decorative animation is disabled.
-- Existing version 2 twelve-hour saves remain compatible, including unsettled changes. Progression always resumes paused. Incompatible older twenty-four-hour saves are ignored. The game works even if browser storage is unavailable.
+For today's shift and free play, pick an opponent:
+- **Rookie:** plans each hour on its own and patches gaps with gas.
+- **Operator:** plans across 3 weather scenarios.
+- **ORBIT:** plans across 12 scenarios and replans every hour.
+
+**Plan.**
+- Read the day's mission and warnings, then choose a starting plan: Lean, Balanced (+50 MW) or More reserve (+110 MW).
+- Edit any hour, then commit.
+- The chart's shaded band shows the likely range of demand your units must cover. Markers show warning windows.
+- Presets look only four hours ahead and ignore warnings. They are starting points, not answers.
+
+**Play.**
+- **Run** advances quiet hours every 1.5 s and checks in after four. **Skip** races to the next real decision. **Step** settles one hour.
+- The clock stops for blackouts, new brownouts, warning changes (storm confirmed, plant tripped, all clear) and new or worsening forecast misses.
+- Decision cards offer concrete moves: hold course, fire up gas, order coal (with a gas bridge if needed) or stand a unit down. Each shows its cost this hour and projected to 20:00 across likely weather. They inform; they don't optimise.
+- Switching a unit yourself applies from the selected hour until that unit's next scheduled change.
+
+**Results.**
+- **Efficiency** = perfect-hindsight cost ÷ your cost. Stars at 92%, 96% and 98.5%.
+- **🛡 Lights on:** no unserved demand at all.
+- **🌿 Carbon:** emit no more than the cheapest possible shift for that weather would have.
+- The coach names your costliest call and splits your gap into plan and in-shift regret.
+- Also shown: a cost race measured above hindsight, an hour-by-hour replay against your opponent and hindsight, personal bests, a copyable share line and a CSV export.
 
 ## Rules and accounting
 
-All conventional units begin off at 08:00. Commit one on/off schedule for all twelve hours. Each revealed hour starts from that submitted schedule; real-time changes apply to that hour only. The submitted plan is copied independently of actual decisions.
+Running cost = MWh × rate + the hourly online charge (paid even at 0 MW). Starting a unit from off costs its start-up. Each hour a unit differs from your committed plan costs its change charge. Unserved demand up to 3% of the hour's demand is a brownout at £300/MWh; the rest is a blackout at £2,500/MWh. All units start off at 08:00. Renewables dispatch first; committed units then run cheapest first. There are no ramp limits, minimum outputs or network constraints.
 
-Renewables dispatch first, with proportional curtailment when excess. Committed conventional units then dispatch by increasing variable cost from zero to capacity. Idle online units still incur their hourly online cost. Switching is instant at hour boundaries: no ramps, startup delays, minimum up/down times or minimum outputs. No network or market bidding.
+|Unit|Type|MW|£/MWh|Online £/h|Start £|Change £/h|Notice|tCO₂/MWh|
+|---|---|---:|---:|---:|---:|---:|---|---:|
+|N1 Northbank|Nuclear|240|14|1,000|10,000|1,200|Fixed for the shift|0.012|
+|C1 Ironbridge|Coal|180|34|550|4,500|320|2 hours|0.92|
+|C2 Moorfield|Coal|140|39|420|3,400|260|1 hour|0.96|
+|G1 Riverside|Gas|180|67|500|1,000|160|Instant|0.36|
+|G2 Eastgate|Gas|120|90|350|600|120|Instant|0.43|
+|G3 Hilltop|Gas|90|125|250|350|90|Instant|0.49|
 
-Both players minimize running + startups + hourly plan deviations + shortage penalties. Running includes generated MWh times rate plus the online hourly charge. A startup is an off-to-on edge from the previous settled hour. Each settled unit state differing from its submitted state incurs one change charge, on or off. Repeated toggling before settlement is free. Unmet demand costs £2,500/MWh. Each hour is exactly one hour, so its MW shortage equals MWh unserved.
+Wind capacity is 280 MW and solar 300 MW. Forecast errors persist from hour to hour (AR(1)).
 
-|Unit|Type|MW|£/MWh|Online £/h|Start £|Change £|Direct tCO₂/MWh|
-|---|---|---:|---:|---:|---:|---:|---:|
-|N1 Northbank|Nuclear|240|14|1000|10000|2400|0.012|
-|C1 Ironbridge|Coal|180|34|550|4500|1600|0.92|
-|C2 Moorfield|Coal|140|39|420|3400|1300|0.96|
-|G1 Riverside|Gas|180|67|180|1000|800|0.36|
-|G2 Eastgate|Gas|120|90|90|600|600|0.43|
-|G3 Hilltop|Gas|90|115|50|350|450|0.49|
+**Day types.** A day draws zero to two of the following; both players always face the same outcome:
 
-Wind capacity is 280 MW, solar 300 MW, with zero operating cost. Emissions and curtailment are reported separately, not priced into the objective. Money and direct generation factors are illustrative, not real tariffs or lifecycle emissions. Displayed money is rounded; ledgers preserve original values and CSV exports four decimal places.
+| Day type | What happens | Notice |
+|---|---|---|
+| Storm front | Wind farms shut down | Confirmed 2 hours ahead |
+| Faulty pump | A plant trips offline | 1-hour vibration alarm |
+| Morning fog | Solar is smothered | None |
+| Heatwave | Evening peak moves later and higher | Known in the forecast |
+| Cup final | Demand surges at the final whistle | Confirmed 2 hours ahead |
 
-## Actual ORBIT simulator method
+Warnings show a probability that updates by Bayes' rule as the window passes.
 
-The local simulator is not connected to production ORBIT. It makes no claim of quantum advantage, measured superiority or general stochastic optimality.
+Money and emission factors are illustrative.
 
-1. A central forecast covers hours 08 through 19. Distinct versioned random streams generate the forecast, hidden realized shift and each planning scenario. Errors are persistent and physically bounded.
-2. ORBIT independently generates twelve plausible paths. A dynamic program searches 12 hours × 64 on/off fleet states × 64 predecessor states. Each state uses scenario-average running and shortage costs, and transitions include startup costs. It chooses one common nonanticipative submitted plan.
-3. Each current-hour revelation triggers a rolling-horizon replan. The policy accepts only the forecast, revealed prefix, own submitted plan and previous settled commitment. Conditional scenarios start from the latest revealed errors; current conditions are known, future conditions are uncertain. Plan-change charges are included. Only the current action is implemented.
-4. The hidden realized array stays in the session closure. Opponent plans/actions are withheld until results. Both players receive identical actual conditions and rules. This is a gameplay information boundary, not adversarial browser security.
+## Opponents and the ORBIT simulator
 
-The DP is exact for its finite scenario-average scheduling model; it is not a full scenario tree with globally optimal contingent recourse. The player helpers use central forecasts/current-hour conditions, never the opponent’s plan. A human can win or lose based on decisions.
+Opponents receive only public information: the forecast, warnings, revealed hours and their own schedule. The hidden day lives inside the session closure. ORBIT is a local simulator, not a production service, and makes no claim of optimality. It works in three steps:
 
-## Code and validation
+1. Twelve plausible weather paths are sampled from separate random streams. They are conditioned on revealed errors and current warning states.
+2. An exact dynamic program over all 64 on/off fleet states chooses the schedule with the lowest scenario-average cost. Future hours are valued as if gaps can be patched with instant gas, a two-stage recourse approximation.
+3. Every hour it replans with plan-change charges, respecting the same notice periods as you, and implements only the current hour.
 
-- `engine.mjs`: weather, dispatch, objective, DP, causal policy and session.
-- `support.mjs`: starter schedules, current-gap aid, save validation, 24-record export and isolated tour example.
-- `experience.mjs`: public chart data, one-click decisions, weather events, intervention rules and guarded progression controller.
-- `app.mjs`: interface, secondary views, persistence and tour animation.
-- `styles.css`: responsive controls and shared game/demo visuals.
-- `tests/engine.test.mjs`, `tests/ux-model.test.mjs`, `tests/experience.test.mjs`: thirty model and interaction-state tests.
-- `tests/VALIDATION.md`: browser and artifact verification evidence for this release.
+## Balance targets
 
-Background: [PyPSA unit commitment](https://docs.pypsa.org/stable/examples/unit-commitment/) and [stochastic optimization](https://docs.pypsa.org/latest/user-guide/optimization/stochastic/). Grid Shift implements its own small JavaScript model.
+`node scripts/balance.mjs 80` plays 80 days with scripted players and checks:
 
-## Local Documents copy
+|Target|Last run|
+|---|---|
+|Each preset is the best choice on ≥20% of days|Lean 31%, Balanced 28%, More reserve 41%|
+|Expert in-shift play beats one-click play by ≥1.5 efficiency points|2.0 points|
+|A better plan (ORBIT's) beats the Balanced preset by ≥1 point|1.7 points|
+|4–8 pauses per shift|4.5|
+|Balanced + one-click beats Rookie ≥60%|78%|
+|Skilled play beats ORBIT 20–60% of the time|26%|
+|One-click averages 1–2★; ORBIT ≥2★|1.43★ / 2.33★|
+|ORBIT earns the carbon medal on 20–70% of days|51%|
 
-This complete project was copied to `/Users/ehsanmassah/Documents/grid_shift` on 16 October 2026. The canonical source and earlier outputs remain unchanged. The `outputs/` folder retains the delivered HTML, source archive, and preview screenshots; the top-level `grid-shift.html` is the convenient playable copy and the target of the local build command.
+One-click play leaves about 3.4 efficiency points on the table during the shift. About 1.6 of those are irreducible uncertainty, so roughly 2 points of in-shift skill is the ceiling in this model.
 
-The source repository had no commits or refs. A clean local Git repository is initialized here on `main`, with all project files uncommitted and no remote configured. No credentials, transient runtime state or caches were copied. The existing non-secret private Site identity remains in `.openai/hosting.json`; copying this project does not publish it.
+## Code map
+
+| File | What it holds |
+|---|---|
+| `config.mjs` | All tuning |
+| `world.mjs` | Days, forecasts, events, warnings, hidden realization, scenarios |
+| `engine.mjs` | Dispatch, settlement, notice locks, DP solver, starter plans |
+| `opponents.mjs` | Rookie, Operator and ORBIT |
+| `session.mjs` | The information boundary |
+| `scoring.mjs` | Hindsight, stars, medals, coaching, share text |
+| `experience.mjs` | Chart rows, uncertainty band, decision cards, alerts, run control |
+| `campaign.mjs` | Campaign days and the daily code |
+| `support.mjs` | Saves, CSV, tour example |
+| `ui-*.mjs` | Markup for views, charts, dialogs and the tour |
+| `app.mjs` | State, persistence and events |
+| `styles.css` | Styles |
+
+`scripts/build-local.mjs` bundles the modules (each in its own scope) into `grid-shift.html`. `tests/VALIDATION.md` records the browser verification for this release. `outputs/` holds current screenshots.

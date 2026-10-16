@@ -1,171 +1,380 @@
-import {VERSION,HOURS,START_HOUR,FLEET,SHORTAGE_PRICE,createSession,dispatch,settle,summarize,capacity} from './engine.mjs';
-import {clockLabel,starterPlan,coverGap,restoreSaved,savedSnapshot,exportCsv,buildTourExample} from './support.mjs';
-import {chooseAssist,conditionsEvent,needsIntervention,timelineData,createProgression,streakFor} from './experience.mjs';
+/** Grid Shift controller: state, persistence, actions and run control. Markup lives in ui-*.mjs. */
+import {HOURS, RUN, PRESETS, OPPONENTS, FLEET} from './config.mjs';
+import {settle, summarize, flipRun, editableFrom, isOn, NUCLEAR, starterPlan} from './engine.mjs';
+import {makeDay, clockLabel} from './world.mjs';
+import {scoreShift, carbonEstimate, carbonTarget, coach, shareText} from './scoring.mjs';
+import {campaignDay, campaignTrack, nextCampaignDay, goalMet, dailyCode, CAMPAIGN} from './campaign.mjs';
+import {restoreSaved, savedSnapshot, exportCsv, sessionFor} from './support.mjs';
+import {timelineData, needBand, decisionOptions, hourStatus, warningChanges, needsIntervention, createProgression, streakFor} from './experience.mjs';
+import {header, footer, homeView, planView, playView, resultsView} from './ui-views.mjs';
+import {rulesDialog, forecastDialog, hourCostsDialog, detailsDialog, auditDialog, confirmShortageDialog, retryDialog, shareDialog} from './ui-dialogs.mjs';
+import {createTour} from './ui-tour.mjs';
 
-const q=s=>document.querySelector(s),app=q('#app'),overlay=q('#overlay'),tourDialog=q('#tour');
-const escapeHtml=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const number=(n,d=0)=>n.toLocaleString('en-GB',{minimumFractionDigits:d,maximumFractionDigits:d});
-const pounds=n=>`£${number(n)}`;
-const on=(mask,i)=>Boolean(mask&(1<<i));
-const newCode=()=>`GS-${crypto.getRandomValues(new Uint32Array(1))[0].toString(36).slice(0,5).toUpperCase()}`;
-const mixNames=mask=>FLEET.filter((u,i)=>on(mask,i)).map(u=>u.id).join(' + ')||'None';
-const icons={
- Nuclear:'<path d="m7 32 4-23h14l4 23M3 32h30M13 5V1m9 3V0"/><path d="m20 32 4-27h13l5 27"/>',
- Coal:'<path d="M4 32V16h33v16zM8 16V3h6v13m14 0V0h5v16M9 23h5m5 0h5m5 0h4"/>',
- Gas:'<path d="M3 32V17l11-7v7l12-7v7h12v15zM30 17V2h5v15M9 24h5m5 0h5m5 0h4"/>',
- Wind:'<path d="M14 34V13m15 21V20M14 13 11 0h6l-2 12 12 7-3 4-11-9-12 8-2-4zM29 20l-2-10h4l-1 9 10 6-2 3-10-7-9 6-2-3z"/>',
- Solar:'<path d="M6 8h30l5 22H1zM14 8l-2 22m14-22 2 22M4 19h34M9 30v5m23-5v5"/>'
-};
-function makeGame(seed='SHIFT-26'){
- const session=createSession(seed);return {seed,session,plan:starterPlan(session.forecast),phase:'plan',masks:[],view:null,draft:0,selected:0};
-}
-let game=makeGame(),preset='balanced',undoPlan=null,replay=0,saveWorks=true,toastTimer=null,migration=false;
-try{const saved=JSON.parse(localStorage.getItem('grid-shift-v2')||'null'),loaded=restoreSaved(saved);if(loaded){game=loaded;preset=['balanced','lean','reserve'].includes(saved.preset)?saved.preset:'custom';}else migration=Boolean(localStorage.getItem('grid-shift-v1'));}catch{}
-function saveGame(){try{localStorage.setItem('grid-shift-v2',JSON.stringify({...savedSnapshot(game),preset}));}catch{saveWorks=false;}}
-function toast(text){clearTimeout(toastTimer);q('#toast').textContent=text;q('#toast').classList.add('show');toastTimer=setTimeout(()=>q('#toast').classList.remove('show'),2800);}
-function resetGame(seed){pauseRun();undoDraft=null;advanced=false;feedback='';game=makeGame(seed);preset='balanced';undoPlan=null;replay=0;saveGame();render();window.scrollTo({top:0});}
-function planLedger(){let previousMask=0;return game.plan.map((mask,h)=>{const row=settle({hour:h,mask,previousMask,planMask:mask,actual:game.session.forecast.hours[h]});previousMask=mask;return row;});}
-function currentRow(){return settle({hour:game.view.hour,mask:game.draft,previousMask:game.view.ledger.at(-1)?.mask??0,planMask:game.plan[game.view.hour],actual:game.view.actual});}
-function header(){return `<header class="topbar"><div class="brand"><span class="brand-mark" aria-hidden="true">ϟ</span><h1>GRID SHIFT</h1></div><div class="top-actions"><button class="tour-trigger" data-action="tour">▶ Quick tour</button><button class="quiet rules-trigger" data-action="rules">Rules</button><button class="quiet" data-action="new">New shift</button></div></header>`;}
-function steps(){const phaseIndex=['plan','play','results'].indexOf(game.phase);return `<nav class="steps" aria-label="Shift stages"><div class="stages">${['Plan','Play','Results'].map((s,i)=>`<span class="stage ${i===phaseIndex?'active':i<phaseIndex?'done':''}" ${i===phaseIndex?'aria-current="step"':''}><b>${i<phaseIndex?'✓':i+1}</b>${s}</span>`).join('')}</div><span class="shift-label">08:00–20:00 · 12 HOURS</span></nav>`;}
-function footer(){return `<footer class="footer"><span>${escapeHtml(game.seed)} · ${saveWorks?'Saved here':'Saving unavailable'}</span><button class="text-button" data-action="rules">Costs &amp; ORBIT simulator</button></footer>`;}
-function hourStrip(mode='plan'){
- return `<div class="hour-strip" role="group" aria-label="${mode==='plan'?'Choose an hour to edit':mode==='results'?'Choose a replay hour':'Shift progress'}">${Array.from({length:HOURS},(_,h)=>{
-   let selected=mode==='plan'?game.selected===h:mode==='results'?replay===h:game.view.hour===h;
-   let row=mode==='plan'?dispatch(game.plan[h],game.session.forecast.hours[h]):mode==='results'?game.view.ledger[h]:game.view.ledger[h];
-   let hint=mode==='plan'?(row.shortage?'Gap':'Ready'):mode==='results'?(row.shortage?'Gap':'✓'):h<game.view.hour?'✓':h===game.view.hour?'NOW':'·';
-   let cls=mode==='play'?(h<game.view.hour?'done':h>game.view.hour?'future':''):'';
-   const max=mode==='plan'?Math.min(100,(game.session.forecast.hours[h].demand/850)*100):0;
-   return `<button class="hour-button ${cls}" data-${mode==='plan'?'hour':mode==='results'?'replay':'progress'}="${h}" ${mode==='play'?'disabled':''} aria-${mode==='play'?'current':'pressed'}="${selected}" aria-label="${clockLabel(h)}${mode==='plan'?`, ${hint}`:''}"><span>${String(START_HOUR+h).padStart(2,'0')}<span class="desktop-clock">:00</span></span><span class="hour-indicator ${row?.shortage?'risk':''}">${hint}</span>${mode==='plan'?`<i class="mini-bar ${row.shortage?'risk':''}" style="width:${max}%"></i>`:''}</button>`;
- }).join('')}</div>`;
-}
-function sourceScene(d){const groups=[['Nuclear',d.outputs[0],'#b9a1ff'],['Coal',d.outputs[1]+d.outputs[2],'#b2c4d2'],['Gas',d.outputs[3]+d.outputs[4]+d.outputs[5],'#fbbf24'],['Wind',d.windUsed,'#5eead4'],['Solar',d.solarUsed,'#e5c47a']];return `<div class="sources">${groups.map(([name,value,color])=>`<div class="source ${value>0?'producing':''}" style="color:${color}"><svg viewBox="0 0 43 38" aria-hidden="true">${icons[name]}</svg><span class="source-name">${name}</span><b>${number(value)} <small>MW</small></b></div>`).join('')}</div>`;}
-function balanceMarkup(mask,a,{planning=false,compact=false}={}){
- const d=dispatch(mask,a),available=capacity(mask)+a.wind+a.solar;
- const denominator=Math.max(1,a.demand),ren=Math.min(100,d.renewable/denominator*100),thermal=Math.min(100-ren,d.conventional/denominator*100),gap=100-ren-thermal;
- return `<div class="balance-content"><div class="balance-numbers"><div class="balance-number"><small>Demand</small><strong>${number(a.demand)} <span>MW</span></strong></div><div class="balance-number"><small>${planning?'Can supply':'Power supplied'}</small><strong class="${d.shortage?'bad':'good'}">${number(planning?available:d.served)} <span>MW</span></strong></div></div><div class="balance-track" role="img" aria-label="${number(d.served)} of ${number(a.demand)} megawatts supplied; ${number(d.shortage)} megawatts short"><i class="renew" style="width:${ren}%"></i><i class="thermal" style="width:${thermal}%"></i><i class="gap" style="width:${gap}%"></i></div><div class="balance-status"><strong class="${d.shortage?'bad':'good'}">${d.shortage?`${number(d.shortage,1)} MW short`:'✓ Balanced'}</strong><span>${d.shortage?'Add a generator':`${number(d.spare)} MW spare`}</span></div>${compact?'':sourceScene(d)+`<p class="narrow-renew">Wind ${number(d.windUsed)} MW · Solar ${number(d.solarUsed)} MW</p><p class="auto-note">Output adjusts automatically. You choose which units are on.</p>`}</div>`;
-}
-function unitCard(u,i,mask,d,{planning=false,diff=0,tour=false,focus=false}={}){
- return `<button class="unit ${on(diff,i)?'changed':''} ${focus?'tour-focus':''}" style="--unit:${u.color}" data-${tour?'tour-unit':'unit'}="${i}" aria-label="${u.id} ${u.name}, ${u.type}" aria-pressed="${on(mask,i)}"><span class="unit-name">${u.type}<span class="unit-id">${u.id}</span></span><span class="unit-state">${on(mask,i)?'ON':'OFF'}</span><span class="unit-power"><span><b>${planning?u.capacity:number(d.outputs[i])}</b><span class="power-label"> ${planning?'MW':`/ ${u.capacity} MW`}</span></span><span class="unit-cost ${on(diff,i)?'changed-cost':''}">${on(diff,i)?`+${pounds(u.change)} change`:planning?`${pounds(u.rate)}/MWh`:u.name}</span></span></button>`;
-}
-function controls(mask,a,planning){const d=dispatch(mask,a),diff=planning?0:mask^game.plan[game.view.hour],count=FLEET.filter((u,i)=>on(mask,i)).length;return `<section class="panel controls"><div class="panel-head"><h3>Your generators</h3><span class="tag">${count} ON</span></div><div class="unit-grid">${FLEET.map((u,i)=>unitCard(u,i,mask,d,{planning,diff})).join('')}</div><div class="control-bottom">${d.shortage?`<p class="bad">${number(d.shortage,1)} MW to cover</p><button class="cover" data-action="cover">Add enough power</button>`:planning?'<p>Tap a card to switch it.</p><button class="quiet" data-action="copy">Use mix all shift</button>':`<p>${diff?`${FLEET.filter((u,i)=>on(diff,i)).length} change${FLEET.filter((u,i)=>on(diff,i)).length>1?'s':''} · ${pounds(currentRow().adjustment)}`:'Following your plan'}</p><button class="quiet" data-action="restore" ${diff?'':'disabled'}>Undo changes</button>`}</div></section>`;}
-function mixMarkup(mask,base=null){return FLEET.map((u,i)=>`<span class="mix-unit ${on(mask,i)?'on':''} ${base!==null&&on(mask^base,i)?'changed':''}" style="--unit:${u.color}" title="${u.name}: ${on(mask,i)?'on':'off'}">${u.id}</span>`).join('');}
-const mixColors=['#b9a1ff','#b2c4d2','#fbbf24','#5eead4','#e5c47a'];
-const mixLabels=['Nuclear','Coal','Gas','Wind','Solar'];
-const progression=createProgression();
-let runTimer=null,runCount=0,undoDraft=null,advanced=false,lastAdvanceAt=0,feedback='';
-function pauseRun(){clearTimeout(runTimer);runTimer=null;progression.pause();}
-function publicRows(){return timelineData({forecast:game.session.forecast,plan:game.plan,history:game.view?.history??[],ledger:game.view?.ledger??[],draft:game.draft,currentHour:game.phase==='play'?game.view.hour:null});}
-function timelineChart(rows,selected,{current=null,id='main',interactive=true}={}){
- const w=840,h=234,left=40,right=12,top=21,bottom=28,plotW=w-left-right,step=plotW/12,bw=step*.67,max=Math.max(800,Math.ceil(Math.max(...rows.map(r=>r.served+r.spare),...rows.map(r=>r.demand))/200)*200),y=v=>top+(max-v)/max*(h-top-bottom),x=i=>left+step*(i+.5);
- const forecastPoints=rows.map((r,i)=>`${x(i)},${y(r.forecastDemand)}`).join(' '),actualRows=rows.filter(r=>r.actualDemand!==null);
- return `<div class="timeline-wrap"><svg class="timeline-chart" preserveAspectRatio="none" viewBox="0 0 ${w} ${h}" role="group" aria-label="Generation mix and demand for twelve hours. Solid bars are revealed hours; faded bars are forecasts. White line is revealed actual demand; dashed gold line is forecast demand."><defs><pattern id="${id}-gap" width="7" height="7" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="7" height="7" fill="#783545"/><rect width="3" height="7" fill="#fb7185"/></pattern><pattern id="${id}-future" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="1.5" height="6" fill="#061820" opacity=".48"/></pattern></defs>
- ${[0,max/2,max].map(v=>`<line class="gridline" x1="${left}" x2="${w-right}" y1="${y(v)}" y2="${y(v)}"/><text class="axis" x="${left-8}" y="${y(v)+4}" text-anchor="end">${v}</text>`).join('')}<text class="axis" x="5" y="12">MW</text>
- ${current!==null?`<rect class="current-band" x="${left+step*current}" y="${top-12}" width="${step}" height="${h-top-bottom+20}" rx="4"/>`:''}
- ${rows.map((r,i)=>{let sum=0;const bars=r.generation.map((value,j)=>{const prior=sum;sum+=value;return value>0?`<rect x="${x(i)-bw/2}" y="${y(sum)}" width="${bw}" height="${Math.max(0,y(prior)-y(sum))}" fill="${mixColors[j]}"/>`:'';}).join('');return `<g class="chart-column ${r.kind==='forecast'?'future-column':''}" ${interactive?`data-chart-hour="${i}" role="button" tabindex="0" aria-label="Inspect ${clockLabel(i)}, ${r.kind}, demand ${number(r.demand)} MW, ${r.shortage?`${number(r.shortage)} MW gap`:`${number(r.spare)} MW spare`}"`:''}><title>${clockLabel(i)} · ${r.kind}\nDemand ${number(r.demand)} MW · Supplied ${number(r.served)} MW\n${mixLabels.map((name,j)=>`${name}: ${number(r.generation[j])} MW`).join('\n')}\n${number(r.spare)} MW spare · ${number(r.shortage)} MW gap</title><rect class="hitbox" x="${left+step*i}" y="${top-12}" width="${step}" height="${h-top+12}" fill="transparent"/>${r.spare>0?`<rect class="spare-outline" x="${x(i)-bw/2}" y="${y(r.served+r.spare)}" width="${bw}" height="${y(r.served)-y(r.served+r.spare)}"/>`:''}${bars}${r.shortage>0?`<rect x="${x(i)-bw/2}" y="${y(r.demand)}" width="${bw}" height="${y(r.served)-y(r.demand)}" fill="url(#${id}-gap)"/>`:''}${r.kind==='forecast'?`<rect x="${x(i)-bw/2}" y="${y(r.served)}" width="${bw}" height="${y(0)-y(r.served)}" fill="url(#${id}-future)"/>`:''}<text class="hour-axis ${i%2?'odd-axis':''}" x="${x(i)}" y="${h-7}" text-anchor="middle" fill="${i===selected?'#fbbf24':r.kind==='forecast'?'#92adac':'#edf8f2'}">${String(START_HOUR+i).padStart(2,'0')}${i===current?'•':''}</text>${i===selected?`<line x1="${x(i)-bw/2}" x2="${x(i)+bw/2}" y1="${h-1}" y2="${h-1}" stroke="#fbbf24" stroke-width="3"/>`:''}</g>`;}).join('')}
- <polyline class="forecast-line" points="${forecastPoints}"/>${actualRows.length?`<polyline class="actual-line" points="${actualRows.map(r=>`${x(r.hour)},${y(r.actualDemand)}`).join(' ')}"/>${actualRows.map(r=>`<circle cx="${x(r.hour)}" cy="${y(r.actualDemand)}" r="3.5" fill="#fff"/>`).join('')}`:''}</svg></div>`;
-}
-function chartPanel({demoRows=null,demoSelected=0,demoCurrent=null,id='main'}={}){
- const rows=demoRows??publicRows(),selected=demoRows?demoSelected:game.phase==='results'?replay:game.selected,r=rows[selected],current=demoRows?demoCurrent:game.phase==='play'?game.view.hour:null;
- return `<section class="panel dispatch-panel"><div class="chart-heading"><div><h3>Demand & generation</h3></div><div class="line-legend"><span class="forecast-key">Forecast demand</span><span class="actual-key">Actual demand</span></div></div>${timelineChart(rows,selected,{current,id,interactive:!demoRows})}<div class="chart-legend">${mixLabels.map((label,i)=>`<span style="--color:${mixColors[i]}">${label}</span>`).join('')}<span class="spare-key">Spare</span><span class="gap-key">Gap</span></div><div class="chart-readout" aria-live="polite"><b>${clockLabel(selected)} <small>${r.kind==='forecast'?'FORECAST':r.kind==='live'?'LIVE PREVIEW':'SETTLED'}</small></b><span>Demand <strong>${number(r.demand)}</strong></span><span>Supply <strong>${number(r.served)}</strong></span><span class="${r.shortage?'bad':'good'}"><strong>${number(r.shortage||r.spare)}</strong> ${r.shortage?'gap':'spare'} <small>MW</small></span></div><div class="chart-caption">${demoRows?'':game.phase==='play'?`<button class="text-button" data-action="now">↩ ${clockLabel(game.view.hour)} live</button>`:'<span>Tap a column to inspect an hour.</span>'}<span>Faded = forecast · outline = spare capacity</span></div></section>`;
-}
-function cityScene(row){const ratio=row.served/Math.max(1,row.actual.demand),buildings=[{x:16,y:32,w:31,h:53},{x:52,y:17,w:36,h:68},{x:94,y:43,w:29,h:42},{x:130,y:4,w:37,h:81},{x:173,y:27,w:32,h:58},{x:211,y:44,w:30,h:41}];return `<svg class="city ${row.shortage?'strained':'powered'}" viewBox="0 0 260 104" role="img" aria-label="${number(ratio*100)} percent of demand supplied"><path class="city-wire" d="M0 96H260"/>${buildings.map((b,i)=>`<rect x="${b.x}" y="${b.y}" width="${b.w}" height="${b.h}" fill="#0a2630" stroke="#46626a"/>${Array.from({length:Math.floor(b.h/15)*2},(_,j)=>`<rect class="city-window" x="${b.x+7+(j%2)*13}" y="${b.y+8+Math.floor(j/2)*15}" width="5" height="6" fill="${(i*7+j)%30<ratio*30?'#f5d781':'#203c45'}"/>`).join('')}`).join('')}<circle class="power-pulse" cx="24" cy="96" r="3" fill="#5eead4"/><circle class="power-pulse second" cx="94" cy="96" r="3" fill="#5eead4"/></svg>`;}
-function currentPanel(row,{planning=false}={}){const totals=summarize(game.view?.ledger??[]),done=game.view?.ledger.length??0;return `<aside class="panel grid-status ${row.shortage?'grid-alert':''}"><div class="status-heading"><span class="eyebrow">${planning?'FORECAST BALANCE':'THE CITY IS COUNTING ON YOU'}</span><b class="${row.shortage?'bad':'good'}">${row.shortage?'POWER GAP':'LIGHTS ON'}</b></div>${cityScene(row)}<div class="live-balance"><strong>${number(row.served)}<small> / ${number(row.actual.demand)} MW</small></strong><span>${row.shortage?`${number(row.shortage,1)} MW needs covering`:`${number(row.spare)} MW spare capacity`}</span></div><div class="status-bottom">${planning?`<span>Wind <b>${number(row.windUsed)} MW</b></span><span>Solar <b>${number(row.solarUsed)} MW</b></span>`:`<span><b>${done}/12</b> hours settled</span><span><b>${streakFor(game.view.ledger)}</b> clean streak</span>`}</div></aside>`;}
-function advancedControls(mask,a,planning){const d=dispatch(mask,a),diff=planning?0:mask^game.plan[game.view.hour];return `<div class="advanced-toggle"><button class="text-button" data-action="advanced" aria-expanded="${advanced}">${advanced?'−':'+'} Individual generators</button>${!planning?`<button class="text-button" data-action="restore" ${diff?'':'disabled'}>Restore submitted mix</button>`:''}</div>${advanced?`<section class="panel advanced"><div class="unit-grid">${FLEET.map((u,i)=>unitCard(u,i,mask,d,{planning,diff})).join('')}</div>${planning?'<div class="control-bottom"><p>Applies to the selected hour.</p><button class="quiet" data-action="copy">Use mix all shift</button></div>':'<p class="auto-note">Output allocates automatically. Changes apply to this hour only.</p>'}</section>`:''}`;}
-function assistCards(){const row=currentRow(),h=game.view.hour,opts={mask:game.draft,actual:game.view.actual,previousMask:game.view.ledger.at(-1)?.mask??0,planMask:game.plan[h]};return `<div class="decision-cards">${[['cover','ϟ','Cover gap'],['trim','↘','Trim cost'],['reserve','◇','Keep reserve']].map(([kind,icon,label])=>{const mask=chooseAssist(kind,opts),next=settle({hour:h,...opts,mask}),delta=next.total-row.total,changed=mask!==game.draft,detail=kind==='cover'?(row.shortage?`${number(row.shortage)} MW restored`:'Demand covered'):kind==='trim'?(changed?`${pounds(Math.max(0,-delta))} saved this hour`:'Already at lowest hourly cost'):(changed?`${number(next.spare)} MW spare`:'90+ MW already spare');return `<button class="decision ${kind} ${kind==='cover'&&row.shortage?'urgent':''}" data-assist="${kind}" ${!changed?'disabled':''}><span class="decision-icon">${icon}</span><span><b>${label}</b><small>${detail}</small></span><em>${changed?(Math.abs(delta)<.5?'£0 change':`${delta>0?'+':'−'}${pounds(Math.abs(delta))}`):'✓'}</em></button>`;}).join('')}</div>`;}
-function eventBanner(){const h=game.view.hour,a=game.view.actual,f=game.session.forecast.hours[h],ev=conditionsEvent(a,f,game.draft),event=ev.events[0];return `<div class="event-banner ${ev.shortage?'danger':event?'weather':'calm'}" role="status"><span class="event-symbol">${event?.kind==='wind'?'≈':event?.kind==='cloud'?'☁':event?.kind==='demand'?'↗':ev.shortage?'ϟ':'✓'}</span><div><b>${ev.shortage?`${event?.title??'Power gap'} · action needed`:event?`${feedback==='Power restored · nice recovery'?'Power restored':event.title} · grid holding`:feedback||'Grid holding steady'}</b><span>${event?`${event.detail}: ${event.delta>0?'+':''}${number(event.delta)} MW. `:''}${ev.shortage?`Cover ${number(ev.shortage)} MW before continuing.`:progression.running?'Running through quiet hours. Pause whenever you like.':'Inspect the chart, make a call, then run the shift.'}</span></div><span class="run-state">${progression.running?'<i></i> RUNNING':'Ⅱ PAUSED'}</span></div>`;}
-function planning(){const h=game.selected,a=game.session.forecast.hours[h],ledger=planLedger(),row=ledger[h],total=summarize(ledger),gaps=ledger.filter(l=>l.shortage>0).length;return `<main id="main" class="plan">${steps()}<div class="page-title"><div><span class="eyebrow">YOUR MISSION · KEEP THE LIGHTS ON FOR 12 HOURS</span><h2>Take the grid. Beat the cost.</h2></div><button class="quiet" data-action="forecast">Weather outlook ↗</button></div><div class="strategy-row"><span class="eyebrow">CHOOSE YOUR APPROACH</span><div class="presets" aria-label="Starting plan"><button data-preset="lean" aria-pressed="${preset==='lean'}">Lean <small>lower cushion</small></button><button data-preset="balanced" aria-pressed="${preset==='balanced'}">Balanced <small>50 MW target</small></button><button data-preset="reserve" aria-pressed="${preset==='reserve'}">More reserve <small>110 MW target</small></button></div><button class="quiet undo" data-action="undo-plan" ${undoPlan?'':'disabled'} aria-label="Undo last plan edit">↶ Undo</button></div><div class="command-view">${chartPanel()}${currentPanel(row,{planning:true})}</div>${advancedControls(game.plan[h],a,true)}<div class="action-bar"><div class="action-summary"><strong>${pounds(total.total)} <small>at forecast</small></strong><span>${gaps?`${gaps} forecast gaps`:'12 hours covered'} · Actual conditions will change</span></div><button class="primary" data-action="start">Commit plan & take control →</button></div></main>`;}
-function playing(){const h=game.view.hour,row=currentRow(),total=summarize(game.view.ledger);return `<main id="main" class="play ${progression.running?'is-running':''}">${steps()}<div class="page-title"><div><span class="eyebrow">KEEP THE LIGHTS ON · CONTROL THE COST</span><h2>${clockLabel(h)} <span class="muted">/ ${clockLabel(h+1)}</span> <small>HOUR ${h+1}/12</small></h2></div><div class="shift-spend"><small>SHIFT SPEND</small><b>${pounds(total.total)}</b><span>ORBIT revealed at finish</span></div></div>${eventBanner()}<div class="command-view">${chartPanel()}${currentPanel(row)}</div>${assistCards()}<div class="decision-meta"><span>${undoDraft===null?'Choose a move. The chart and cost update before you commit.':'Preview updated. Nothing is charged until the hour advances.'}</span><button class="text-button" data-action="undo-draft" ${undoDraft===null?'disabled':''}>↶ Undo</button></div>${advancedControls(game.draft,game.view.actual,false)}<div class="action-bar"><div class="action-summary"><strong>${pounds(row.total)} <small>this hour</small></strong><button class="text-button" data-action="hour-costs">${row.shortage?`${pounds(row.penalty)} shortage penalty`:`${pounds(row.adjustment)} plan changes`} · breakdown</button></div><div class="transport"><button class="quiet step-button" data-action="settle" aria-label="Advance one hour">Step →</button><button class="primary ${progression.running?'pause-button':''}" data-action="${progression.running?'pause':'run'}">${progression.running?'Ⅱ Pause shift':h===11?'Finish shift →':'▶ Run shift'}</button></div></div></main>`;}
-function costRace(human,orbit){const w=840,h=180,l=54,r=36,t=18,b=30,totals=rows=>{let s=0;return [0,...rows.map(row=>(s+=row.total))];},a=totals(human),c=totals(orbit),max=Math.max(...a,...c)*1.08,x=i=>l+i*(w-l-r)/12,y=v=>h-b-v/max*(h-t-b);return `<section class="panel cost-race"><div class="chart-heading"><h3>The cost race</h3><div class="line-legend"><span class="you-key">You</span><span class="orbit-key">ORBIT</span></div></div><svg class="race-chart" viewBox="0 0 ${w} ${h}" role="img" aria-label="Cumulative cost by hour, you ${pounds(a.at(-1))}, ORBIT ${pounds(c.at(-1))}">${[0,max/2,max].map(v=>`<line class="gridline" x1="${l}" x2="${w-r}" y1="${y(v)}" y2="${y(v)}"/><text class="axis" x="${l-7}" y="${y(v)+4}" text-anchor="end">£${number(v/1000)}k</text>`).join('')}${[[a,'#fbbf24'],[c,'#5eead4']].map(([s,color])=>`<polyline fill="none" stroke="${color}" stroke-width="3" points="${s.map((v,i)=>`${x(i)},${y(v)}`).join(' ')}"/>`).join('')}${[0,3,6,9,12].map(i=>`<text class="axis" x="${x(i)}" y="${h-8}" text-anchor="middle">${clockLabel(i)}</text>`).join('')}</svg></section>`;}
-function results(){const human=summarize(game.view.ledger),orbit=summarize(game.view.orbitLedger),delta=human.total-orbit.total,h=replay,a=game.view.ledger[h],b=game.view.orbitLedger[h],clean=game.view.ledger.filter(l=>l.shortage<1e-7).length;return `<main id="main" class="results">${steps()}<div class="page-title"><div><span class="eyebrow">SHIFT COMPLETE · ${clean}/12 HOURS FULLY SUPPLIED</span><h2>${human.shortage?'A shift to learn from.':'You kept the lights on.'}</h2><p>${Math.abs(delta)<.01?'You and ORBIT finished level.':delta<0?`You beat ORBIT by ${pounds(-delta)}.`:`ORBIT came in ${pounds(delta)} cheaper. Can you close the gap?`}</p></div></div><div class="scorecards"><article class="scorecard you"><h3>YOU</h3><strong>${pounds(human.total)}</strong><p>${human.shortage?`${number(human.shortage,1)} MWh unmet`:'✓ Every megawatt delivered'}</p></article><article class="scorecard orbit"><h3>ORBIT SIMULATOR</h3><strong>${pounds(orbit.total)}</strong><p>${orbit.shortage?`${number(orbit.shortage,1)} MWh unmet`:'✓ Every megawatt delivered'}</p></article></div>${costRace(game.view.ledger,game.view.orbitLedger)}<div class="result-actions"><button class="primary" data-action="new">Take another shift →</button><button class="quiet" data-action="retry">Try this shift again</button></div><section class="panel result-replay"><div class="panel-head"><h3>Where did the money go?</h3><span class="tag">${clockLabel(h)}–${clockLabel(h+1)}</span></div><div class="replay-hours">${hourStrip('results')}</div><div class="replay-conditions"><span>Demand <b>${number(a.actual.demand)} MW</b></span><span>Wind <b>${number(a.actual.wind)} MW</b></span><span>Solar <b>${number(a.actual.solar)} MW</b></span></div><div class="replay-grid">${[[a,'YOU'],[b,'ORBIT']].map(([l,name])=>`<div class="replay-card"><h3 class="${name==='YOU'?'yellow':'good'}">${name}</h3><div class="mix-row"><span>Plan</span>${mixMarkup(l.planMask)}</div><div class="mix-row"><span>Ran</span>${mixMarkup(l.mask,l.planMask)}</div><div class="replay-cost">${pounds(l.total)} <small>${l.shortage?`${number(l.shortage,1)} MWh unmet`:`${number(l.spare)} MW spare`}</small></div></div>`).join('')}</div><p class="replay-reason"><b>ORBIT’s decision:</b> ${escapeHtml(game.view.orbitActions[h])}</p></section><div class="details-actions"><button class="quiet" data-action="results-details">Costs & impact</button><button class="quiet" data-action="audit">Hourly records</button><button class="quiet" data-action="download">Download CSV</button></div></main>`;}
-function scheduleRun(){clearTimeout(runTimer);if(!progression.running||game.phase!=='play')return;const ticket=progression.ticket(game.view.hour);runTimer=setTimeout(()=>settleCurrent(ticket,true),4000);}
-function startRun(){if(game.phase!=='play')return;if(currentRow().shortage){action('settle');return;}progression.run(game.view.hour);runCount=0;feedback='';render();scheduleRun();}
-function settleCurrent(ticket,automatic=false){if(game.phase!=='play'||!progression.consume(ticket,game.view.hour))return;const oldHour=game.view.hour,mask=game.draft;game.view=game.session.settle(mask);game.masks.push(mask);lastAdvanceAt=Date.now();undoDraft=null;runCount++;advanced=false;
- if(game.view.complete){game.phase='results';replay=0;pauseRun();}
- else{game.draft=game.plan[game.view.hour];game.selected=game.view.hour;const ev=conditionsEvent(game.view.actual,game.session.forecast.hours[game.view.hour],game.draft);progression.arrived(game.view.hour,{needsDecision:!automatic||needsIntervention(game.view.actual,game.session.forecast.hours[game.view.hour],game.draft,game.view.history[game.view.hour-1],game.session.forecast.hours[game.view.hour-1])});feedback=ev.needsDecision?'':runCount>=3?'Three hours delivered · take a look ahead':`Hour delivered · ${streakFor(game.view.ledger)} clean in a row`;}
- saveGame();render();if(game.view.complete)window.scrollTo({top:0});else scheduleRun();toast(game.view.complete?'12 hours complete. ORBIT’s decisions are now revealed.':`${clockLabel(oldHour)} ${game.view.ledger.at(-1).shortage?'settled with gap':'delivered'} · ${pounds(game.view.ledger.at(-1).total)}${progression.running?'':' · paused'}`);
-}
-function advance(){if(Date.now()-lastAdvanceAt<400)return;pauseRun();if(game.phase!=='play')return;progression.run(game.view.hour);settleCurrent(progression.ticket(game.view.hour),false);}
-function applyAssist(kind){pauseRun();const before=game.draft,old=currentRow();undoDraft=before;game.draft=chooseAssist(kind,{mask:before,actual:game.view.actual,previousMask:game.view.ledger.at(-1)?.mask??0,planMask:game.plan[game.view.hour]});game.selected=game.view.hour;feedback=old.shortage&&!currentRow().shortage?'Power restored · nice recovery':kind==='trim'?'Cost trimmed · grid holding':'Reserve secured';saveGame();render();toast(feedback);}
+const q = s => document.querySelector(s), app = q('#app'), overlay = q('#overlay');
+const STORE = {game: 'grid-shift-v3', prefs: 'grid-shift-prefs', bests: 'grid-shift-bests', campaign: 'grid-shift-campaign'};
+let saveWorks = true;
+const load = (key, fallback) => { try { return JSON.parse(localStorage.getItem(key) ?? 'null') ?? fallback; } catch { return fallback; } };
+const store = (key, value) => { try { localStorage.setItem(key, JSON.stringify(value)); } catch { saveWorks = false; } };
+const newCode = () => `GS-${crypto.getRandomValues(new Uint32Array(1))[0].toString(36).slice(0, 5).toUpperCase()}`;
 
-function render(focus=null){app.innerHTML=`<div class="shell">${header()}${game.phase==='plan'?planning():game.phase==='play'?playing():results()}${footer()}</div>`;if(focus)q(focus)?.focus({preventScroll:true});}
-function editPlan(next){undoPlan=[...game.plan];game.plan=next;preset='custom';saveGame();}
-function openOverlay(title,body,actions=''){pauseRun();render();overlay.innerHTML=`<div class="dialog-head"><h2 id="overlay-title">${title}</h2><button class="close" data-close aria-label="Close dialog">×</button></div><div class="dialog-body">${body}</div>${actions?`<div class="dialog-actions">${actions}</div>`:''}`;overlay.showModal();}
-function costRows(total){return `<div class="cost-lines">${[['Running + online','running'],['Startups','startup'],['Plan changes','adjustment'],['Unmet demand','penalty'],['Total','total']].map(([label,key])=>`<div class="cost-line ${key==='total'?'total':''}"><span>${label}</span><strong>${pounds(total[key])}</strong></div>`).join('')}</div>`;}
-function forecastChart(forecast,history=[]){const w=620,h=190,l=38,r=12,t=10,b=24,x=i=>l+i*(w-l-r)/(HOURS-1),y=v=>t+(1000-v)/1000*(h-t-b),points=(rows,key)=>rows.map((a,i)=>`${x(i)},${y(a[key])}`).join(' ');return `<svg class="chart" viewBox="0 0 ${w} ${h}" role="img" aria-label="Demand, wind and solar forecasts from 08:00 to 20:00. Actual demand is shown only for revealed hours.">${[0,250,500,750,1000].map(v=>`<line x1="${l}" x2="${w-r}" y1="${y(v)}" y2="${y(v)}"/><text x="${l-6}" y="${y(v)+4}" text-anchor="end">${v}</text>`).join('')}${forecast.hours.map((a,i)=>`<text x="${x(i)}" y="${h-6}" text-anchor="middle">${START_HOUR+i}</text>`).join('')}<polyline fill="none" stroke="#fbbf24" stroke-width="2.5" points="${points(forecast.hours,'demand')}"/><polyline fill="none" stroke="#5eead4" stroke-width="2.5" points="${points(forecast.hours,'wind')}"/><polyline fill="none" stroke="#b9a1ff" stroke-width="2.5" points="${points(forecast.hours,'solar')}"/>${history.length?`<polyline fill="none" stroke="#fff" stroke-width="3" points="${points(history,'demand')}"/>`:''}</svg><div class="legend"><span style="--color:var(--yellow)">Demand</span><span style="--color:var(--cyan)">Wind</span><span style="--color:var(--purple)">Solar</span>${history.length?'<span style="--color:white">Actual demand</span>':''}</div>`;}
-function showForecast(){const f=game.session.forecast,history=game.view?.history??[];openOverlay('Shift forecast',`${forecastChart(f,history)}<p>Typical variations: demand ±50 MW, wind ±80 MW, solar ±35%. Conditions can stay above or below forecast for several hours.</p><details><summary>Hourly values</summary><div class="table-scroll"><table class="data-table"><thead><tr><th>Hour</th><th>Demand</th><th>Wind</th><th>Solar</th><th>Actual demand</th><th>Actual wind</th><th>Actual solar</th></tr></thead><tbody>${f.hours.map((a,i)=>`<tr><td>${clockLabel(i)}</td><td>${number(a.demand)}</td><td>${number(a.wind)}</td><td>${number(a.solar)}</td>${['demand','wind','solar'].map(k=>`<td>${history[i]?number(history[i][k]):'—'}</td>`).join('')}</tr>`).join('')}</tbody></table></div><p>All values in MW. Unrevealed actual values stay hidden.</p></details>`);}
-function showRules(){openOverlay('Costs & simulator',`<p><b>Lowest total cost wins.</b> Every hour lasts one hour. You choose on/off; power is allocated automatically, renewables first and then the cheapest online generators. Units switch instantly at hour boundaries.</p><details open><summary>What you pay</summary><p>Running cost = energy used + the unit’s online charge. A unit starting from off incurs a startup cost. A settled state that differs from your submitted plan incurs one change charge per unit for that hour. Changes apply only to the current hour. Unmet demand costs <b>${pounds(SHORTAGE_PRICE)}/MWh</b>.</p><div class="table-scroll"><table class="data-table"><thead><tr><th>Unit</th><th>MW</th><th>£/MWh</th><th>Online £/h</th><th>Start £</th><th>Change £</th></tr></thead><tbody>${FLEET.map(u=>`<tr><td>${u.id} ${u.type}</td><td>${u.capacity}</td><td>${u.rate}</td><td>${number(u.fixed)}</td><td>${number(u.startup)}</td><td>${number(u.change)}</td></tr>`).join('')}</tbody></table></div></details><details><summary>Starter plans and the power helper</summary><p>Balanced plans aim for 50 MW above forecast demand; More reserve aims for 110 MW; Lean follows the central forecast. They use a simple hourly cost comparison and startup costs. They do not copy ORBIT. “Cover gap” adds units to cover current demand. “Trim cost” searches all mixes for the lowest current-hour cost while serving demand; it does not optimize future startups. “Keep reserve” adds capacity for at least 90 MW spare. Cards show the full cost change, including startup and plan-change charges. Output is allocated automatically. Run advances quiet hours every four seconds, pauses on a weather alert or gap, and checks in after at most three hours. Pause and Step give you full control; there is no time penalty.</p></details><details><summary>How ORBIT makes decisions</summary><p>This is a local <b>ORBIT simulator</b>. It searches 64 fleet combinations over 12 forecast scenarios using dynamic programming, choosing a common day-ahead schedule. Each hour it replans using only the forecast, conditions already revealed, its own previous commitment and submitted plan. It never receives future realized conditions.</p><p>Both players face the same seeded day and scoring rules. Separate random streams generate the hidden day and planning scenarios. Choices and costs are computed; there is no scripted winner. This finite-scenario rolling model is not connected to a production ORBIT service and makes no claim of quantum advantage or general stochastic optimality.</p></details><details><summary>Game simplifications</summary><p>All conventional units begin off at 08:00. No ramp delays, minimum output, minimum on/off times or network constraints. Wind capacity is 280 MW; solar is 300 MW. Extra renewables are curtailed. Money and direct emission factors are illustrative. Emissions and curtailment are reported separately from the cost objective.</p><p>Each shift has twelve one-hour decisions, 08:00–20:00. Progress stays in this browser. The same day code repeats the forecast and weather; retries are practice runs.</p></details>`);}
-function showNew(){openOverlay('Start a new shift',`<p>${game.phase==='play'?'This will replace your current progress.':'A new day brings a different forecast and weather.'}</p><form id="new-form" class="seed-form"><label for="new-seed">Day code<input id="new-seed" value="${newCode()}" maxlength="24" pattern="[A-Za-z0-9-]+" autocomplete="off" required></label><button class="primary" type="submit">Start planning →</button></form>`);q('#new-form').onsubmit=e=>{e.preventDefault();const seed=q('#new-seed').value.toUpperCase().replace(/[^A-Z0-9-]/g,'').slice(0,24);if(seed){overlay.close();resetGame(seed);}};}
-function showDetails(){const a=summarize(game.view.ledger),b=summarize(game.view.orbitLedger);openOverlay('The shift, accounted for',`<table class="data-table compare-table"><thead><tr><th></th><th>You</th><th>ORBIT</th></tr></thead><tbody>${[['Running + online','running'],['Startups','startup'],['Plan changes','adjustment'],['Unmet demand penalty','penalty'],['Total cost','total']].map(([label,key])=>`<tr><th>${label}</th><td class="${key==='total'?'total':''}">${pounds(a[key])}</td><td class="${key==='total'?'total':''}">${pounds(b[key])}</td></tr>`).join('')}${[['Unmet demand','shortage','MWh'],['Emissions','emissions','t CO₂'],['Renewables curtailed','curtailment','MWh']].map(([label,key,unit])=>`<tr><th>${label}</th><td>${number(a[key],1)} ${unit}</td><td>${number(b[key],1)} ${unit}</td></tr>`).join('')}</tbody></table><p style="margin-top:13px">Currency is shown to the nearest pound. Totals use unrounded hourly values.</p>`);}
-function showAudit(){const rows=ledger=>`<div class="table-scroll"><table class="data-table"><thead><tr><th>Hour</th><th>Plan</th><th>Ran</th><th>Unmet MWh</th><th>Running £</th><th>Start £</th><th>Change £</th><th>Penalty £</th><th>Total £</th></tr></thead><tbody>${ledger.map(l=>`<tr><td>${clockLabel(l.hour)}</td><td>${mixNames(l.planMask)}</td><td>${mixNames(l.mask)}</td><td>${number(l.shortage,1)}</td>${['running','startup','adjustment','penalty','total'].map(k=>`<td>${number(l[k])}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;openOverlay('Hourly records',`<details open><summary>Your 12 hours</summary>${rows(game.view.ledger)}</details><details><summary>ORBIT’s 12 hours</summary>${rows(game.view.orbitLedger)}</details>`,`<button class="quiet" data-action="download">Download CSV</button>`);}
-function download(){const csv=exportCsv(game.seed,game.view.ledger,game.view.orbitLedger),url=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8;'})),a=document.createElement('a');a.href=url;a.download=`grid-shift-${game.seed.toLowerCase()}.csv`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);toast('Downloaded all 24 records: 12 for each player.');}
-function action(name){
- switch(name){
-  case'run':startRun();break;
-  case'pause':pauseRun();render();break;
-  case'now':game.selected=game.view.hour;render();break;
-  case'advanced':pauseRun();advanced=!advanced;render();break;
-  case'undo-draft':if(undoDraft!==null){pauseRun();game.draft=undoDraft;undoDraft=null;feedback='Decision undone';saveGame();render();}break;
-  case'tour':openTour();break;
-  case'rules':showRules();break;
-  case'new':showNew();break;
-  case'forecast':showForecast();break;
-  case'undo-plan':if(undoPlan){const previous=[...game.plan];game.plan=[...undoPlan];undoPlan=previous;preset='custom';saveGame();render('[data-action="undo-plan"]');toast('Plan edit undone.');}break;
-  case'copy':editPlan(Array(HOURS).fill(game.plan[game.selected]));saveGame();render('[data-action="copy"]');toast('Mix applied to all 12 hours.');break;
-  case'cover':{
-   if(game.phase==='plan'){const a=game.session.forecast.hours[game.selected],p=[...game.plan];p[game.selected]=coverGap({mask:p[game.selected],actual:a,previousMask:game.selected?game.plan[game.selected-1]:0});editPlan(p);}
-   else game.draft=coverGap({mask:game.draft,actual:game.view.actual,previousMask:game.view.ledger.at(-1)?.mask??0,planMask:game.plan[game.view.hour]});
-   saveGame();render();toast('Grid balanced. Cost updated.');break;
+let game = null, screen = 'home', migrated = false;
+const prefs = {opponent: 'orbit', ...load(STORE.prefs, {})};
+if (!OPPONENTS[prefs.opponent]) prefs.opponent = 'orbit';
+const bests = load(STORE.bests, {}), progress = load(STORE.campaign, {});
+let undoPlan = null, undoDraft = null, unitsOpen = {plan: true, play: false}, feedback = '', replay = 0, freeCode = newCode(), pendingStart = null, toastTimer = null;
+let cache = {}, dailyCache = null;
+const progression = createProgression();
+let runTimer = null, fast = false, lastAdvanceAt = 0;
+
+/* ---------- Persistence ---------- */
+
+function save() {
+  store(STORE.game, game ? {...savedSnapshot(game), screen} : null);
+  store(STORE.prefs, prefs);
+}
+try {
+  const saved = load(STORE.game, null), restored = restoreSaved(saved);
+  if (restored) { game = {...restored, changes: []}; screen = saved.screen === 'home' ? 'home' : 'game'; }
+  else migrated = Boolean(saved) || Boolean(localStorage.getItem('grid-shift-v2'));
+} catch { /* storage blocked: play without it */ }
+
+/* ---------- Derived state ---------- */
+
+const day = () => game.session.day;
+const budget = () => (cache.budget ??= carbonEstimate(day()));
+const previousMask = () => game.view.ledger.at(-1)?.mask ?? 0;
+function currentRow() {
+  const v = game.view;
+  return settle({hour: v.hour, mask: game.draft[v.hour], previousMask: previousMask(), planMask: game.plan[v.hour], actual: v.actual});
+}
+function planLedger() {
+  let prev = 0;
+  return game.plan.map((mask, t) => { const row = settle({hour: t, mask, previousMask: prev, actual: day().forecast.hours[t]}); prev = row.mask; return row; });
+}
+function band() {
+  const key = `${game.seed}|${game.view.history.length}`;
+  if (cache.bandKey !== key) { cache.band = needBand(day(), game.view.history, game.view.warnings); cache.bandKey = key; }
+  return cache.band;
+}
+function options() {
+  const v = game.view, key = `${v.hour}|${game.draft.join(',')}`;
+  if (cache.optionsKey !== key) {
+    cache.options = decisionOptions({day: day(), h: v.hour, actual: v.actual, schedule: game.draft, plan: game.plan, previousMask: previousMask(), history: v.history, warnings: v.warnings});
+    cache.optionsKey = key;
   }
-  case'start':if(game.phase!=='plan')break;pauseRun();game.selected=0;advanced=false;undoDraft=null;feedback='';game.view=game.session.start(game.plan);game.phase='play';game.masks=[];game.draft=game.plan[0];saveGame();render();window.scrollTo({top:0});toast('Plan committed. Your shift is live.');break;
-  case'settle':{if(game.phase!=='play')break;pauseRun();const row=currentRow();if(row.shortage)openOverlay('Settle with a power gap?',`<p class="notice"><b>${number(row.shortage,1)} MW</b> will go unmet. This hour includes a <b>${pounds(row.penalty)}</b> shortage penalty.</p>`,`<button data-close>Go back</button><button class="primary" data-action="accept-shortage">Settle anyway</button>`);else advance();break;}
-  case'accept-shortage':overlay.close();advance();break;
-  case'restore':pauseRun();undoDraft=game.draft;game.draft=game.plan[game.view.hour];saveGame();render();toast('Your submitted mix is restored.');break;
-  case'plan-costs':openOverlay('Cost at the forecast',costRows(summarize(planLedger()))+'<p>Actual weather and demand will change the final cost.</p>');break;
-  case'hour-costs':openOverlay(`${clockLabel(game.view.hour)} cost preview`,costRows(currentRow())+'<p>You pay when you settle. Toggling units before then is free.</p>');break;
-  case'results-details':showDetails();break;
-  case'audit':showAudit();break;
-  case'download':download();break;
-  case'retry':openOverlay('Try the same shift again?',`<p>The forecast and weather repeat exactly. Your current results will be replaced.</p>`,`<button data-close>Keep results</button><button class="primary" data-action="accept-retry">Retry this shift</button>`);break;
-  case'accept-retry':overlay.close();resetGame(game.seed);break;
- }
+  return cache.options;
 }
-app.addEventListener('click',e=>{
- const el=e.target.closest('button,[data-chart-hour]');if(!el||el.disabled)return;
- if(el.dataset.chartHour!==undefined){if(game.phase==='play')pauseRun();game.selected=+el.dataset.chartHour;saveGame();render();}
- else if(el.dataset.assist)applyAssist(el.dataset.assist);
- else if(el.dataset.action)action(el.dataset.action);
- else if(el.dataset.hour!==undefined){game.selected=+el.dataset.hour;saveGame();render(`[data-hour="${game.selected}"]`);}
- else if(el.dataset.replay!==undefined){replay=+el.dataset.replay;render(`[data-replay="${replay}"]`);}
- else if(el.dataset.preset){const margins={balanced:50,lean:0,reserve:110};editPlan(starterPlan(game.session.forecast,margins[el.dataset.preset]));preset=el.dataset.preset;saveGame();render(`[data-preset="${preset}"]`);toast(preset==='lean'?'Lean plan: less reserve, more exposure to surprises.':preset==='reserve'?'More reserve: extra capacity against surprises.':'Balanced plan: a 50 MW forecast cushion.');}
- else if(el.dataset.unit!==undefined){const i=+el.dataset.unit;if(game.phase==='plan'){const next=[...game.plan];next[game.selected]^=1<<i;editPlan(next);}else {pauseRun();undoDraft=game.draft;game.draft^=1<<i;game.selected=game.view.hour;}saveGame();render(`[data-unit="${i}"]`);}
-});
-app.addEventListener('keydown',e=>{if(e.target.closest('[data-chart-hour]')&&['Enter',' '].includes(e.key)){e.preventDefault();e.target.closest('[data-chart-hour]').dispatchEvent(new MouseEvent('click',{bubbles:true}));return;}if(!['ArrowLeft','ArrowRight'].includes(e.key))return;const el=e.target.closest('[data-hour],[data-replay]');if(!el)return;e.preventDefault();const increment=e.key==='ArrowRight'?1:-1;if(game.phase==='plan'){game.selected=(game.selected+increment+HOURS)%HOURS;saveGame();render(`[data-hour="${game.selected}"]`);}else{replay=(replay+increment+HOURS)%HOURS;render(`[data-replay="${replay}"]`);}});
-overlay.addEventListener('click',e=>{const button=e.target.closest('button');if(!button)return;if(button.hasAttribute('data-close'))overlay.close();else if(button.dataset.action)action(button.dataset.action);});
+function results() {
+  if (!cache.results) {
+    const v = game.view, c = coach({day: day(), plan: v.plan, ledger: v.ledger, actualHours: v.actualDay}), target = carbonTarget(c.bestLedger);
+    cache.results = {coach: c, score: scoreShift({ledger: v.ledger, best: c.best, budget: target}), rival: scoreShift({ledger: v.rivalLedger, best: c.best, budget: target}), isBest: false, previousBest: null};
+  }
+  return cache.results;
+}
+const bestKey = () => game.campaignId ?? `${game.seed}|${game.opponent}`;
 
-// A separate example and animation clock; never passes the live session into the demo.
-let tourData=null,tourStep=0,tourFrame=0,tourAuto=true,tourTimers=[];
-const tourCaptions=[
- ['See the whole shift.','Generation stacks meet the demand line. Outlines show spare capacity; faded columns are forecasts.'],
- ['Commit. Then run.','Pick a strategy once. Run carries you through quiet hours; you can pause or step at any time.'],
- ['Surprise: the wind drops.','Wind is 110 MW below forecast. The shift pauses with a 130 MW power gap.'],
- ['One click brings the lights back.','Cover gap adds gas. The chart reacts immediately: 620 MW supplied, 50 MW spare.'],
- ['Keep moving. Stay in control.','Resume after your decision. Alerts and three-hour check-ins stop the clock for you.'],
- ['See how your calls compare.','After all 12 hours, reveal ORBIT’s real decisions and replay the cost race.']
-];
-function clearTourTimers(){tourTimers.forEach(clearTimeout);tourTimers=[];}
-function scheduleTour(){clearTourTimers();if(!tourAuto||!tourDialog.open||tourStep===5)return;if([1,3,4].includes(tourStep)&&tourFrame===0)tourTimers.push(setTimeout(()=>{tourFrame=1;renderTour();},1200));tourTimers.push(setTimeout(()=>{tourStep++;tourFrame=0;renderTour();scheduleTour();},4400));}
-function openTour(){pauseRun();render();tourData=buildTourExample();tourStep=0;tourFrame=0;tourAuto=!window.matchMedia('(prefers-reduced-motion: reduce)').matches;renderTour();tourDialog.showModal();scheduleTour();}
-function closeTour(){clearTourTimers();tourDialog.close();q('[data-action="tour"]')?.focus({preventScroll:true});}
-function renderTour(){const step=tourStep,frame=tourFrame,d=tourData;let visual;
- if(step===5)visual=`<div class="tour-score"><span>YOUR COST <b>${pounds(d.humanTotal.total)}</b></span><span>ORBIT <b>${pounds(d.orbitTotal.total)}</b></span></div>${costRace(d.human,d.orbit)}`;
- else{const live=step>=2,mask=step===3&&frame||step===4?9:1,current=step===4&&frame?3:live?0:null,history=step===4&&frame?d.human.slice(0,4).map(r=>r.actual):live?[d.surprise]:[],ledger=step===4&&frame?d.human.slice(0,3):[],rows=timelineData({forecast:d.forecast,plan:d.plan,history,ledger,draft:mask,currentHour:current});
- visual=`${step===2||step===3?`<div class="event-banner ${step===3&&frame?'calm':'danger'}"><span class="event-symbol">≈</span><div><b>${step===3&&frame?'Power restored':'Wind drop · shift paused'}</b><span>${step===3&&frame?'Gas closes the gap · £800 plan change':'180 → 70 MW wind · 130 MW short'}</span></div></div>`:'<div class="tour-stage-title"><span>08:00–20:00 · 12 HOURS</span><span>EXAMPLE SHIFT</span></div>'}${chartPanel({demoRows:rows,demoSelected:current??0,demoCurrent:current,id:'tour'})}<div class="tour-demo-controls">${step===0?'<span class="tag">BALANCED PLAN</span><span>Choose a strategy, then commit.</span>':step===1?`<button class="primary ${frame?'':'tour-focus'}" data-tour-act="animate">${frame?'▶ Running through quiet hours':'Commit plan & take control →'}</button>`:step===2?'<span class="bad">The clock waits for you. No rush.</span>':step===3?`<button class="decision cover ${frame?'':'tour-focus'}" data-tour-act="animate"><span class="decision-icon">ϟ</span><span><b>${frame?'✓ Grid balanced':'Cover gap'}</b><small>${frame?'620 MW supplied · 50 MW spare':'Restore 130 MW in one click'}</small></span></button>`:`<button class="primary" data-tour-act="animate">${frame?'Ⅱ Pause shift':'▶ Run shift'}</button><span>${frame?'Three hours delivered · check in':'Your decision. Your pace.'}</span>`}</div>`;
- }
- tourDialog.innerHTML=`<div class="tour-head"><div><h2 id="tour-title">Take the grid in 25 seconds</h2><span>INTERACTIVE EXAMPLE · YOUR SHIFT IS SAFE</span></div><button class="text-button" data-tour-act="close">${step===5?'Close':'Skip tour'}</button></div><div class="tour-stage">${visual}</div><div class="tour-caption" aria-live="polite"><h3>${tourCaptions[step][0]}</h3><p>${tourCaptions[step][1]}</p></div><div class="tour-nav"><div class="tour-dots" aria-label="Step ${step+1} of 6">${tourCaptions.map((c,i)=>`<i class="${step===i?'active':''}"></i>`).join('')}</div><div class="tour-buttons">${step===5?'<button class="quiet" data-tour-act="replay">↺ Replay</button><button class="primary" data-tour-act="close">Back to my shift →</button>':`<button class="quiet" data-tour-act="pause">${tourAuto?'Ⅱ Pause':'▶ Play'}</button><button class="primary" data-tour-act="next">Next →</button>`}</div></div>`;
+function recordResult() {
+  const r = results(), key = bestKey(), prev = bests[key] ?? null;
+  r.previousBest = prev;
+  r.isBest = !prev || r.score.efficiency > prev.efficiency + 1e-9;
+  if (r.isBest) bests[key] = {efficiency: r.score.efficiency, stars: r.score.stars, total: r.score.total};
+  store(STORE.bests, bests);
+  if (game.campaignId) {
+    const p = progress[game.campaignId] ?? {}, ok = goalMet(campaignDay(game.campaignId).goal, r.score);
+    progress[game.campaignId] = {done: Boolean(p.done || ok), stars: Math.max(p.stars ?? 0, r.score.stars), efficiency: Math.max(p.efficiency ?? 0, r.score.efficiency)};
+    store(STORE.campaign, progress);
+  }
 }
-tourDialog.addEventListener('click',e=>{const el=e.target.closest('button');if(!el)return;switch(el.dataset.tourAct){case'close':closeTour();break;case'animate':tourFrame=1;renderTour();scheduleTour();break;case'next':tourStep=Math.min(5,tourStep+1);tourFrame=0;renderTour();scheduleTour();break;case'pause':tourAuto=!tourAuto;renderTour();scheduleTour();break;case'replay':tourStep=0;tourFrame=0;tourAuto=!window.matchMedia('(prefers-reduced-motion: reduce)').matches;renderTour();scheduleTour();break;}});
-tourDialog.addEventListener('close',clearTourTimers);tourDialog.addEventListener('cancel',clearTourTimers);
-document.addEventListener('visibilitychange',()=>{if(document.hidden&&progression.running){pauseRun();render();}});
-if(game.phase==='play')game.selected=game.view.hour;
-saveGame();render();if(migration)toast('Welcome to the 12-hour version. Your old 24-hour run was reset.');
+
+/* ---------- Rendering ---------- */
+
+function homeContext() {
+  const code = dailyCode();
+  if (dailyCache?.code !== code) dailyCache = {code, day: makeDay(code)};
+  const resume = game && {title: game.session.day.title, mode: game.mode, seed: game.seed, phase: game.phase, hour: game.view.hour};
+  return {track: campaignTrack(progress), next: nextCampaignDay(progress), daily: {code, title: dailyCache.day.title, mission: dailyCache.day.mission}, resume, opponent: prefs.opponent, freeCode, bests};
+}
+
+function planContext() {
+  const warnings = game.view.warnings, ledger = planLedger(), sum = summarize(ledger);
+  return {game, warnings, selected: game.selected, preset: game.preset, undo: Boolean(undoPlan), unitsOpen: unitsOpen.plan, budget: budget(),
+    rows: timelineData({day: day(), schedule: game.plan, warnings}), band: band(), planTotal: sum.total, planCarbon: sum.emissions, goal: campaignDay(game.campaignId)?.goal ?? null};
+}
+
+function playContext() {
+  const v = game.view, h = v.hour, row = currentRow(), settled = summarize(v.ledger);
+  const outageEnd = Object.fromEntries(v.warnings.filter(w => w.kind === 'trip' && w.status === 'active').map(w => [w.unit, w.end]));
+  return {game, warnings: v.warnings, selected: game.selected, row, options: options(), band: band(), budget: budget(), outageEnd,
+    rows: timelineData({day: day(), schedule: game.draft, history: v.history, ledger: v.ledger, warnings: v.warnings}),
+    status: hourStatus(v.actual, day().forecast.hours[h], game.draft[h]), changes: game.changes ?? [], spend: settled.total, carbon: settled.emissions,
+    streak: streakFor(v.ledger), feedback, running: progression.running, undo: undoDraft !== null, unitsOpen: unitsOpen.play};
+}
+
+function resultsContext() {
+  const r = results(), goal = campaignDay(game.campaignId)?.goal ?? null, goalOk = goal ? goalMet(goal, r.score) : false;
+  const index = CAMPAIGN.findIndex(d => d.id === game.campaignId), nextDay = goalOk && index >= 0 && index < CAMPAIGN.length - 1 ? CAMPAIGN[index + 1] : null;
+  return {game, score: r.score, rival: r.rival, coach: r.coach, best: r.coach.best, replay, goal, goalOk, nextDay, isBest: r.isBest, previousBest: r.isBest ? null : bests[bestKey()] ?? null};
+}
+
+function render(focus = null) {
+  const body = screen === 'home' || !game ? homeView(homeContext()) : game.phase === 'plan' ? planView(planContext()) : game.phase === 'play' ? playView(playContext()) : resultsView(resultsContext());
+  app.innerHTML = `<div class="shell">${header(screen === 'home' || !game ? 'home' : 'game')}${body}${footer({game: screen === 'home' ? null : game, saveWorks})}</div>`;
+  const form = q('#free-form');
+  if (form) form.onsubmit = e => {
+    e.preventDefault();
+    const seed = q('#free-code').value.toUpperCase().replace(/[^A-Z0-9-]/g, '').slice(0, 24);
+    if (seed) requestStart({mode: 'free', seed, opponent: prefs.opponent});
+  };
+  const wrap = q('.timeline-wrap');
+  if (wrap && game && wrap.scrollWidth > wrap.clientWidth) wrap.scrollLeft = (game.selected + 0.5) / HOURS * wrap.scrollWidth - wrap.clientWidth / 2;
+  if (focus) q(focus)?.focus({preventScroll: true});
+}
+
+function toast(text) {
+  clearTimeout(toastTimer);
+  const el = q('#toast');
+  el.textContent = text;
+  el.classList.add('show');
+  toastTimer = setTimeout(() => el.classList.remove('show'), 2800);
+}
+
+function openOverlay({title, body, actions = ''}) {
+  pauseRun();
+  render();
+  overlay.innerHTML = `<div class="dialog-head"><h2 id="overlay-title">${title}</h2><button class="close" data-close aria-label="Close dialog">×</button></div><div class="dialog-body">${body}</div>${actions ? `<div class="dialog-actions">${actions}</div>` : ''}`;
+  if (!overlay.open) overlay.showModal();
+}
+
+/* ---------- Game lifecycle ---------- */
+
+function makeGame({mode, seed, campaignId = null, opponent}) {
+  const session = sessionFor({seed, campaignId, opponent});
+  return {mode, seed, campaignId, opponent, session, phase: 'plan', plan: starterPlan(session.day, PRESETS.balanced.margin), preset: 'balanced',
+    settled: [], view: session.view(), draft: null, selected: 0, changes: []};
+}
+
+function requestStart(opts) {
+  if (game && game.phase === 'play') {
+    pendingStart = opts;
+    openOverlay({title: 'Leave the current shift?', body: `<p>Your shift at ${clockLabel(game.view.hour)} will be replaced. Its progress isn't scored.</p>`,
+      actions: '<button data-close>Keep playing</button><button class="primary" data-action="accept-start">Start the new shift</button>'});
+    return;
+  }
+  begin(opts);
+}
+
+function begin(opts) {
+  pauseRun();
+  game = makeGame(opts);
+  screen = 'game';
+  undoPlan = null; undoDraft = null; feedback = ''; replay = 0; cache = {}; unitsOpen = {plan: true, play: false};
+  save();
+  render();
+  window.scrollTo({top: 0});
+}
+
+function editPlan(next) {
+  undoPlan = [...game.plan];
+  game.plan = next;
+  game.preset = 'custom';
+  save();
+}
+
+/* ---------- Run control ---------- */
+
+function pauseRun() { clearTimeout(runTimer); runTimer = null; progression.pause(); }
+
+function scheduleRun() {
+  clearTimeout(runTimer);
+  if (!progression.running || game?.phase !== 'play') return;
+  const ticket = progression.ticket(game.view.hour);
+  runTimer = setTimeout(() => settleCurrent(ticket, true), fast ? RUN.skipMs : RUN.quietMs);
+}
+
+function startRun(isFast) {
+  if (game.phase !== 'play') return;
+  if (currentRow().shortage > 0.5) { action('settle'); return; }
+  fast = isFast;
+  progression.run(game.view.hour, {checkIn: !isFast});
+  feedback = '';
+  render();
+  scheduleRun();
+}
+
+function settleCurrent(ticket, automatic = false) {
+  if (game.phase !== 'play' || !progression.consume(ticket, game.view.hour)) return;
+  const before = game.view, oldHour = before.hour;
+  game.view = game.session.settle(game.draft);
+  game.settled.push([...game.draft]);
+  lastAdvanceAt = Date.now();
+  undoDraft = null;
+  const settledRow = game.view.ledger.at(-1);
+  if (game.view.complete) {
+    game.phase = 'results';
+    replay = 0;
+    pauseRun();
+    recordResult();
+  } else {
+    const h = game.view.hour, f = day().forecast.hours;
+    game.draft = [...game.view.schedule];
+    game.selected = h;
+    game.changes = warningChanges(before.warnings, game.view.warnings);
+    const stop = !automatic || needsIntervention({actual: game.view.actual, forecast: f[h], mask: game.draft[h], previousActual: before.actual, previousForecast: f[h - 1],
+      warnings: game.view.warnings, previousWarnings: before.warnings, previousShortage: settledRow.shortage});
+    const wasRunning = progression.running;
+    progression.arrived(h, {needsDecision: stop});
+    feedback = stop ? '' : wasRunning && !progression.running ? 'Check-in · take a look ahead' : `Hour delivered · ${streakFor(game.view.ledger)} clean in a row`;
+  }
+  save();
+  render();
+  if (game.view.complete) window.scrollTo({top: 0});
+  else scheduleRun();
+  toast(game.view.complete ? '12 hours complete. Graded against perfect hindsight.'
+    : `${clockLabel(oldHour)} ${settledRow.shortage > 0.5 ? 'settled with unserved demand' : 'delivered'} · ${'£' + Math.round(settledRow.total).toLocaleString('en-GB')}${progression.running ? '' : ' · paused'}`);
+}
+
+function advance() {
+  if (Date.now() - lastAdvanceAt < 400) return;
+  pauseRun();
+  if (game.phase !== 'play') return;
+  progression.run(game.view.hour);
+  settleCurrent(progression.ticket(game.view.hour), false);
+}
+
+/* ---------- Edits ---------- */
+
+function toggleUnit(i) {
+  if (game.phase === 'plan') {
+    const next = [...game.plan];
+    if (isOn(NUCLEAR, i)) { const value = !isOn(next[0], i); for (let t = 0; t < HOURS; t++) next[t] = value ? next[t] | (1 << i) : next[t] & ~(1 << i); }
+    else next[game.selected] ^= 1 << i;
+    editPlan(next);
+    render(`[data-unit="${i}"]`);
+    return;
+  }
+  const h = game.view.hour, u = FLEET[i];
+  if (isOn(NUCLEAR, i)) { toast('Nuclear runs all shift or not at all. That was decided in the plan.'); return; }
+  const from = Math.max(game.selected, editableFrom(i, h, day().rules));
+  if (from >= HOURS) { toast(`${u.id} needs ${u.lead} hours' notice. Too late to change it this shift.`); return; }
+  pauseRun();
+  undoDraft = [...game.draft];
+  game.draft = flipRun(game.draft, i, from, !isOn(game.draft[from], i));
+  feedback = '';
+  if (from > game.selected) toast(`${u.id} needs notice: the change takes effect from ${clockLabel(from)}.`);
+  save();
+  render(`[data-unit="${i}"]`);
+}
+
+function applyOption(index) {
+  const o = options()[index];
+  if (!o || o.kind === 'hold') return;
+  pauseRun();
+  const before = currentRow();
+  undoDraft = [...game.draft];
+  game.draft = [...o.schedule];
+  game.selected = game.view.hour;
+  feedback = before.shortage > 0.5 && currentRow().shortage < 0.5 ? 'Power restored · nice recovery' : o.title;
+  save();
+  render();
+  toast(feedback);
+}
+
+function share() {
+  const r = results(), text = shareText({seed: game.seed, title: day().title, score: r.score, rival: {name: game.view.opponent.name, efficiency: r.rival.efficiency}});
+  const fallback = () => openOverlay(shareDialog(text));
+  try { navigator.clipboard.writeText(text).then(() => toast('Result copied. Paste it anywhere.'), fallback); } catch { fallback(); }
+}
+
+function download() {
+  const csv = exportCsv(game.seed, game.view.ledger, game.view.rivalLedger, game.view.opponent.name);
+  const url = URL.createObjectURL(new Blob([csv], {type: 'text/csv;charset=utf-8;'})), a = document.createElement('a');
+  a.href = url;
+  a.download = `grid-shift-${game.seed.toLowerCase()}.csv`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  toast('Downloaded 24 records: 12 for you, 12 for your opponent.');
+}
+
+function action(name, el = null) {
+  switch (name) {
+    case 'home': pauseRun(); screen = 'home'; save(); render(); window.scrollTo({top: 0}); break;
+    case 'resume': screen = 'game'; save(); render(); break;
+    case 'campaign': { const d = campaignDay(el?.dataset.day); if (d) requestStart({mode: 'campaign', seed: d.seed, campaignId: d.id, opponent: d.opponent}); break; }
+    case 'daily': requestStart({mode: 'daily', seed: dailyCode(), opponent: prefs.opponent}); break;
+    case 'accept-start': overlay.close(); if (pendingStart) begin(pendingStart); pendingStart = null; break;
+    case 'tour': tour.open(); break;
+    case 'rules': openOverlay(rulesDialog()); break;
+    case 'forecast': openOverlay(forecastDialog(day(), game.view.history, game.view.warnings)); break;
+    case 'units': unitsOpen[game.phase] = !unitsOpen[game.phase]; render('[data-action="units"]'); break;
+    case 'undo-plan': if (undoPlan) { const previous = [...game.plan]; game.plan = [...undoPlan]; undoPlan = previous; game.preset = 'custom'; save(); render('[data-action="undo-plan"]'); toast('Plan edit undone.'); } break;
+    case 'copy': editPlan(Array(HOURS).fill(game.plan[game.selected])); render('[data-action="copy"]'); toast(`${clockLabel(game.selected)} mix applied to all 12 hours.`); break;
+    case 'start':
+      if (game.phase !== 'plan') break;
+      pauseRun();
+      game.view = game.session.start(game.plan);
+      game.phase = 'play'; game.settled = []; game.draft = [...game.view.schedule]; game.selected = 0; game.changes = [];
+      undoDraft = null; feedback = ''; cache.bandKey = null;
+      save(); render(); window.scrollTo({top: 0}); toast('Plan committed. Your shift is live.');
+      break;
+    case 'now': game.selected = game.view.hour; render(); break;
+    case 'undo-draft': if (undoDraft) { pauseRun(); game.draft = undoDraft; undoDraft = null; feedback = 'Move undone'; save(); render(); } break;
+    case 'reset-draft': pauseRun(); undoDraft = [...game.draft]; game.draft = [...game.view.schedule]; feedback = 'Changes reset'; save(); render(); break;
+    case 'run': startRun(false); break;
+    case 'skip': startRun(true); break;
+    case 'pause': pauseRun(); render(); break;
+    case 'settle': { if (game.phase !== 'play') break; pauseRun(); const row = currentRow(); if (row.shortage > 0.5) openOverlay(confirmShortageDialog(row)); else advance(); break; }
+    case 'accept-shortage': overlay.close(); advance(); break;
+    case 'hour-costs': openOverlay(hourCostsDialog(game.view.hour, currentRow())); break;
+    case 'results-details': openOverlay(detailsDialog(game.view.ledger, game.view.rivalLedger, game.view.opponent.name, results().coach.bestLedger)); break;
+    case 'audit': openOverlay(auditDialog(game.view.ledger, game.view.rivalLedger, game.view.opponent.name)); break;
+    case 'download': download(); break;
+    case 'share': share(); break;
+    case 'copy-share': { const area = q('.share-text'); area?.select(); try { navigator.clipboard.writeText(area.value).then(() => toast('Copied.')); } catch { document.execCommand?.('copy'); } break; }
+    case 'retry': openOverlay(retryDialog()); break;
+    case 'accept-retry': overlay.close(); begin({mode: game.mode, seed: game.seed, campaignId: game.campaignId, opponent: game.opponent}); break;
+  }
+}
+
+/* ---------- Events ---------- */
+
+app.addEventListener('click', e => {
+  const el = e.target.closest('button,[data-chart-hour]');
+  if (!el || el.disabled) return;
+  if (el.dataset.chartHour !== undefined) {
+    const t = Number(el.dataset.chartHour);
+    if (game.phase === 'play') { pauseRun(); game.selected = Math.max(game.view.hour, t); if (t < game.view.hour) toast('Settled hours can’t change. Showing the live hour.'); }
+    else game.selected = t;
+    save(); render();
+  } else if (el.dataset.option !== undefined) applyOption(Number(el.dataset.option));
+  else if (el.dataset.action) action(el.dataset.action, el);
+  else if (el.dataset.replay !== undefined) { replay = Number(el.dataset.replay); render(`[data-replay="${replay}"]`); if (el.closest('.coach')) q('#replay')?.scrollIntoView({behavior: 'smooth'}); }
+  else if (el.dataset.preset) {
+    const key = el.dataset.preset;
+    editPlan(starterPlan(day(), PRESETS[key].margin));
+    game.preset = key;
+    save(); render(`[data-preset="${key}"]`);
+    toast(key === 'lean' ? 'Lean: no cushion, cheapest if the forecast holds.' : key === 'reserve' ? 'More reserve: extra capacity against surprises, at a standby cost.' : 'Balanced: a 50 MW cushion over the forecast.');
+  } else if (el.dataset.opponent) { prefs.opponent = el.dataset.opponent; save(); render(`[data-opponent="${prefs.opponent}"]`); }
+  else if (el.dataset.unit !== undefined) toggleUnit(Number(el.dataset.unit));
+});
+
+app.addEventListener('keydown', e => {
+  const column = e.target.closest('[data-chart-hour]');
+  if (column && ['Enter', ' '].includes(e.key)) { e.preventDefault(); column.dispatchEvent(new MouseEvent('click', {bubbles: true})); return; }
+  const hourButton = e.target.closest('[data-replay]');
+  if (hourButton && ['ArrowLeft', 'ArrowRight'].includes(e.key)) { e.preventDefault(); replay = (replay + (e.key === 'ArrowRight' ? 1 : -1) + HOURS) % HOURS; render(`[data-replay="${replay}"]`); }
+});
+
+overlay.addEventListener('click', e => {
+  const button = e.target.closest('button');
+  if (!button) return;
+  if (button.hasAttribute('data-close')) overlay.close();
+  else if (button.dataset.action) action(button.dataset.action, button);
+});
+
+const tour = createTour({dialog: q('#tour'), onOpen: () => { pauseRun(); render(); }, onClose: () => q('[data-action="tour"]')?.focus({preventScroll: true})});
+
+document.addEventListener('visibilitychange', () => { if (document.hidden && progression.running) { pauseRun(); render(); } });
+
+render();
+if (migrated) toast('Grid Shift has new rules. Your previous shift was cleared.');

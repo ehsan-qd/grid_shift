@@ -1,58 +1,106 @@
-# Grid Shift command deck — validation
+# Grid Shift — validation
 
-Validated on 15 October 2026. Source: `grid-shift-game/dist`. The delivered standalone is generated from those source files; there are no external assets or runtime dependencies.
+Validated on 16 October 2026 against the source in `dist/` and the generated standalone `grid-shift.html`.
 
 ## Automated checks
 
-`node --test tests/*.test.mjs`: **30 tests passed**. The new experience suite covers:
+`node --test tests/*.test.mjs`: **60 tests pass** across six suites.
 
-- Cover and trim decisions against all feasible fleet states, including startup and plan-change costs; reserve finds the least costly eligible 90 MW cushion while preserving online units.
-- Actual wind, cloud and demand events, shortage recovery, and persistent versus materially worsening errors.
-- Twelve chart columns reconciled to dispatch. Past columns use settled actions; the current column previews the draft; future columns use central forecast and submitted plan. A guarded revealed-history array rejects attempts to read beyond the revealed prefix. Changing a draft changes only its current chart column.
-- Progression tokens reject stale callbacks after pause/resume, wrong-hour callbacks, duplicate settlement and skipped hours. Three quiet hours trigger a check-in. Meaningful events and completion stop progression.
-- A full progressed shift, identical actual conditions for both players, complete cost reconciliation and reliability streaks.
-- Save restoration and undo preserve the submitted plan, with no automatic progression on reload. Fresh sessions reset progress.
-- Tour chart shortage and recovery use an isolated example and do not change a live session.
+- **world:**
+  - seeded determinism and physical bounds
+  - persistent forecast errors and day-to-day variety (all five day types, calm and double-event days, peak hour varies, heatwave peaks at 19:00)
+  - campaign rule switches
+  - event effects (storm, fog, surge, trip)
+  - warnings: occurring and non-occurring events are indistinguishable until resolution, probabilities never rise while unconfirmed, and confirmation arrives with the stated notice
+  - scenarios copy revealed history and honour confirmed and cleared warnings
+- **engine:**
+  - merit-order dispatch, curtailment and online charges
+  - brownout and blackout tiers
+  - tripped units
+  - start-up and plan-change accounting
+  - notice locks (nuclear fixed, C1 2 hours, C2 1 hour, gas instant, campaign override)
+  - run-flip edits and plan validation
+  - the DP against brute force
+  - recourse valuation
+  - starter plans and gas cover
+- **session:**
+  - the hidden day and opponent are withheld until results
+  - notice periods are enforced for the player
+  - all three opponents read only public inputs (proxy test) and respect notice
+  - ORBIT reacts to surprises
+  - full playthroughs reconcile row by row
+  - views are defensive copies
+  - a skilled player both wins and loses against ORBIT
+- **scoring:**
+  - hindsight is a lower bound, so efficiency ≤ 100%
+  - star thresholds and medal rules
+  - coaching regrets reconcile exactly (plan regret + in-shift regret = your total − hindsight)
+  - share text
+- **experience:**
+  - chart rows never read beyond the revealed prefix
+  - the uncertainty band narrows as hours reveal
+  - decision cards are distinct, legal under notice rules and priced correctly
+  - projection is deterministic
+  - alerts and warning changes stop the clock
+  - Skip ignores check-ins but not decisions
+  - run tickets reject stale or duplicate callbacks
+- **ux-model:**
+  - v3 saves restore plan, play and results; illegal drafts fall back
+  - old and tampered saves are rejected
+  - campaign saves rebuild campaign days
+  - the CSV export reconciles
+  - the tour is isolated and deterministic
+  - campaign unlocks and goals work
+  - the daily code is date-based
+  - the standalone build has no external references
 
-Existing engine and UX tests continue to cover the 08:00–20:00 horizon, independent random streams, capacity and dispatch, curtailment, startup/deviation/shortage accounting, scenario DP, causal rolling ORBIT, hidden future/opponent information, human wins and losses, save validation, CSV fields and defensive state copies.
+`node scripts/balance.mjs 80`: all eight balance targets pass (numbers in the README).
 
-`node --check dist/app.mjs` passed. The standalone builder reports zero external assets. ZIP integrity and standalone identity are checked during packaging.
+Campaign audit (scripted players on each day's fixed seed):
+- Days 1–3, 6 and 9 are winnable with one-click play.
+- Days 4, 5, 7, 8 and 10 need better play.
+- Every goal is met by expert or ORBIT-level play.
+- No campaign day, and none of 400 random days, has physically unavoidable unserved demand, so the Lights-on medal is always achievable.
 
 ## Browser verification
 
-Tested the source preview and actual generated standalone HTML in the in-app browser, served locally. The delivered HTML itself was played, rather than only the source module entry point. Desktop was approximately 1280×720; responsive inspection included 390×844 and 320×740. There was no horizontal page overflow at either phone width.
+Headless Google Chrome, driven over the DevTools protocol, with console errors and exceptions captured. Pages tested:
+- the standalone file (`file://`)
+- the source served over HTTP from `dist/` (separate ES modules, as on Vercel)
 
-- Planning: presets, plan undo, chart-hour selection, individual generator edits, explicit commitment and new day code.
-- Chart: revealed current/past demand versus future forecast, source stacks, red gap and spare outline, future-column inspection, return to current hour, immediate preview response to cover/reserve actions.
-- Progression: immediate Run/Pause leaves the hour unchanged. Run reached a three-hour checkpoint; new wind and cloud alerts paused the shift. Manual Step advanced one hour. A deliberate double-click advanced only once. Both browser playthroughs completed twelve hours without skips or duplicates.
-- Recovery: SHIFT-26 at 10:00 produced a 31.1 MW shortage under the submitted mix. Cover gap restored supply to 565 MW, added spare capacity, and changed the cost preview from £82,110 (including £77,750 shortage penalty) to £7,293. Reload preserved that draft and remained paused. Restore submitted mix returned the gap; Undo restored the recovered draft. Keep reserve raised the 11:00 spare capacity from 43 MW to 133 MW; Undo returned the original cost and draft.
-- Tour: manually paused/stepped through the wind-drop event and one-click recovery. The demo moved from 490/620 MW and a 130 MW gap to 620/620 MW and 50 MW spare. Closing the demo left the live app text identical. Autoplay was launched separately; a final post-autoplay completion observation was not required for delivery and is not claimed here. Reduced-motion behavior is implemented by manual initial progression and CSS animation suppression; the preference was not separately emulated in the browser.
-- Results: hourly replay, ORBIT reasoning, cost/impact table, results reload and CSV download. The optional browser download took an unusually long time to return; it eventually returned a real file, which was independently read and verified. No outstanding local-delivery approval remains.
-- Layout fixes from inspection: desktop transport no longer covers decision cards; mobile spacing was compressed and the decorative city is suppressed at 320 px to preserve chart/control space. Cost chart end-label margins and compact replay markers were adjusted after visual review.
+**Zero console errors or exceptions in every run.**
 
-### Reconciled complete-shift result
+| Area | What was checked |
+|---|---|
+| Home | Campaign track, today's shift, free-play code form, opponent picker; progress and stars appear after completing days |
+| Plan | Presets, unit toggles, undo, warning chips and chart markers, band, carbon estimate, commit |
+| Play | Full eventful shift (`EVENT-16`, storm + cup final), detailed below |
+| Results | Stars, efficiency, both medals, campaign goal and next-day button, personal best, coach with replay link, relative cost race, replay against opponent and hindsight; details, audit and share dialogs (clipboard is blocked in headless Chrome, so the share dialog fallback was exercised) |
+| Tour | All six steps, interactive option step, score step, close |
+| Phone layout | 390 px and 320 px: no horizontal page overflow on home, plan, play, results or tour; the chart keeps a legible minimum width and scrolls inside its panel |
 
-Both source and standalone playthroughs used Balanced SHIFT-26 and Cover gap at 10:00, with other draft experiments undone before settlement.
+Play checks on `EVENT-16`:
+- Storm confirmed at 11:00, two hours ahead.
+- Notice lock toast ("C2 needs notice: from 12:00").
+- Blackout at 13:00 with dark districts and the hospital on backup.
+- Gas, coal-bridge and stand-down cards.
+- Shortage confirmation dialog.
+- Run carries quiet hours at 1.5 s with a check-in after four.
+- Skip runs to the next real event.
+- Reload mid-shift restores the same hour, paused.
 
-|Component|Player|ORBIT|
-|---|---:|---:|
-|Running + online|£119,477.20|£118,994.80|
-|Startup|£22,900.00|£19,600.00|
-|Plan changes|£1,300.00|£0.00|
-|Shortage penalty|£0.00|£0.00|
-|Total|**£143,677.20**|**£138,594.80**|
-|Demand served|7,065.7 MWh|7,065.7 MWh|
-|Unmet demand|0 MWh|0 MWh|
+Issues found and fixed during this verification:
+- The MW axis label overlapped the chart.
+- Toasts covered the decision cards; they now sit at the top.
+- Skip stopped at quiet check-ins.
+- The carbon budget came from the forecast, so storm days were unwinnable; it is now graded against hindsight.
+- The cost race lines were indistinguishable; they are now drawn as £ above hindsight.
+- Campaign Day 1 had an infeasible evening peak (demand scale added).
+- The gas card vanished when a brownout was cheaper; it is now always offered with an honest price.
+- Small-screen overflow in the coach tag and dialogs.
 
-These match an independent model run. The CSV has 24 rows, twelve per player, clocks 08:00 through 19:00, identical actual conditions, and matching cost-component totals. The original submitted plan remained unchanged; the player's 10:00 action differed by the added C2 unit.
+## Not covered
 
-## Deliverables and hosting
-
-- `grid-shift.html`: one offline-capable, self-contained game.
-- `grid-shift-game.zip`: owning source, standalone copy, build script, tests and this validation record.
-- `grid-shift-preview.jpg`: command deck after recovery.
-- `grid-shift-event.jpg`: cloud-front shortage and the available one-click responses.
-
-Existing private Site identity is retained: `appgprj_6ad0d4f0edb081919d659bdce7d6511a`, static directory `dist`. Port Shift is untouched.
-
-Hosted publication is not completed or claimed. The previously attempted Site helper credential input was rejected with `write_stdin rejected: approval required by policy, but AskForApproval::Granular.sandbox_approval is false`. This release does not retry or bypass that restriction. Local packaging is independent of that publishing step.
+- Reduced-motion behaviour is implemented (tour starts paused; CSS animations disabled) but was not emulated in the browser.
+- The CSV download was exercised by tests on the export function, not by saving a file from the browser.
+- Real players have not yet played this version. The balance numbers come from scripted strategies.
