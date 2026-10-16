@@ -1,0 +1,13 @@
+import {readFileSync,writeFileSync,mkdirSync} from 'node:fs';
+import {resolve,dirname} from 'node:path';
+import {fileURLToPath} from 'node:url';
+const root=resolve(dirname(fileURLToPath(import.meta.url)),'..');
+const output=root;mkdirSync(output,{recursive:true});
+const read=name=>readFileSync(resolve(root,'dist',name),'utf8');
+const code=['engine.mjs','support.mjs','experience.mjs','app.mjs'].map(name=>read(name).replace(/^import[^\n]+\n/gm,'')).join('\n\n');
+if(/<\/script/i.test(code))throw Error('Unsafe embedded script closing tag');
+const icon='data:image/svg+xml,'+encodeURIComponent(read('favicon.svg'));
+let html=read('index.html').replace('href="favicon.svg"',`href="${icon}"`).replace('<link rel="stylesheet" href="styles.css">',`<style>\n${read('styles.css')}\n</style>`).replace('<script type="module" src="app.mjs"></script>',`<script type="module">\n${code}\n</script>`);
+if(/(?:src|href)="(?:app\.mjs|styles\.css|engine\.mjs|support\.mjs|favicon\.svg)"/.test(html))throw Error('A required asset was not inlined');
+writeFileSync(resolve(output,'grid-shift.html'),html);
+console.log(JSON.stringify({output:resolve(output,'grid-shift.html'),bytes:Buffer.byteLength(html),externalAssets:0}));
