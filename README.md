@@ -16,6 +16,12 @@ node scripts/build-local.mjs
 
 The standalone builder writes `grid-shift.html` in this project folder. Hosted identity stays in `.openai/hosting.json` with the existing private Grid Shift project and `dist` directory. Port Shift is a separate project and is untouched. Publication remains subject to the previously reported execution-policy block; no deployment is claimed.
 
+## Deploy to Vercel
+
+Import this repository with the **Root Directory** set to the repository root (leave the field blank). The root `vercel.json` selects the **Other** framework preset, skips the build step, and serves the existing `dist/` directory. No dependencies or environment variables are required.
+
+The homepage is `dist/index.html`; serving the repository root instead leaves `/` without an index page and causes a 404. For an existing Vercel project, deploy the latest commit on `main` so the configuration takes effect. The Output Directory is `dist`, relative to the repository root.
+
 ## New experience
 
 - A full-shift stacked generation chart is the main play surface. Nuclear, coal, gas, wind and solar show delivered generation; outlined segments show spare capacity; striped red segments show gaps. Forecast demand is dashed gold, revealed actual demand is solid white. Future columns are faded and hatched. Select a column to inspect it, or return to the live hour.
