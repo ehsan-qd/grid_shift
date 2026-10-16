@@ -1,0 +1,109 @@
+<div id="gs-control-proposal" class="viz-carousel viz-dotted-background" aria-label="Proposed Grid Shift scheduling controls">
+  <section data-variant="Drag the schedule" aria-label="Drag the schedule">
+    <div class="gs-example" data-example="drag">
+      <div class="gs-top"><span>GRID SHIFT · CONTROL PROPOSAL</span><span>11:00 · PAUSED</span></div>
+      <h3>C1 Ironbridge <span>180 MW · 2 hours’ notice</span></h3>
+      <p class="gs-warning">Storm expected 13:00–18:00</p>
+      <div class="gs-axis" aria-hidden="true"><span>08</span><span>10</span><span>12</span><span>14</span><span>16</span><span>18</span><span>20</span></div>
+      <div class="gs-track" aria-label="Ironbridge operating schedule, 08:00 to 20:00">
+        <div class="gs-locked" aria-hidden="true"></div>
+        <div class="gs-block">
+          <button type="button" class="gs-handle gs-start" aria-label="Start time. Drag or use left and right arrow keys">↔</button>
+          <span class="gs-block-label" aria-hidden="true">ON</span>
+          <button type="button" class="gs-handle gs-end" aria-label="End time. Drag or use left and right arrow keys">↔</button>
+        </div>
+      </div>
+      <div class="gs-time-fields"><label>Start <select class="gs-start-select" aria-label="Ironbridge start time"></select></label><label>End <select class="gs-end-select" aria-label="Ironbridge end time"></select></label></div>
+      <p class="gs-readout" aria-live="polite"></p>
+    </div>
+  </section>
+  <section data-variant="Tap the times" aria-label="Tap the times" hidden>
+    <div class="gs-example" data-example="tap">
+      <div class="gs-top"><span>GRID SHIFT · CONTROL PROPOSAL</span><span>11:00 · PAUSED</span></div>
+      <h3>C1 Ironbridge <span>180 MW · 2 hours’ notice</span></h3>
+      <p class="gs-warning">Storm expected 13:00–18:00</p>
+      <div class="gs-tap-fields"><label>Switch on at <select class="gs-start-select" aria-label="Ironbridge start time"></select></label><label>Switch off at <select class="gs-end-select" aria-label="Ironbridge end time"></select></label></div>
+      <div class="gs-mini" aria-label="Scheduled run"><div class="gs-mini-run"></div></div>
+      <p class="gs-readout" aria-live="polite"></p>
+    </div>
+  </section>
+</div>
+<style>
+#gs-control-proposal {color-scheme:light dark;}
+#gs-control-proposal .gs-example {--gs-bg:light-dark(#eef3f3,#0c1e27);--gs-fg:light-dark(#142d37,#e6eeee);--gs-muted:light-dark(#4f646b,#afc1c7);--gs-panel:light-dark(#dfe8e9,#1c333e);--gs-yellow:light-dark(#f0c94d,#f3c34c);--gs-mark:light-dark(#aebfc6,#72909e);--gs-line:light-dark(#c3d1d4,#3a525e);background:var(--gs-bg);color:var(--gs-fg);font:400 14px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;padding:22px;border-radius:8px;min-height:330px;box-sizing:border-box;}
+#gs-control-proposal .gs-top {display:flex;flex-wrap:wrap;justify-content:space-between;gap:8px;color:var(--gs-muted);font-size:11px;padding-right:80px;}
+#gs-control-proposal h3 {font:500 17px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;margin:18px 0 12px;}
+#gs-control-proposal h3 span {font-weight:400;font-size:12px;color:var(--gs-muted);display:inline-block;}
+#gs-control-proposal .gs-warning {margin:0 0 18px;background:var(--gs-panel);padding:8px 10px;border-radius:4px;}
+#gs-control-proposal .gs-axis {display:flex;justify-content:space-between;color:var(--gs-muted);font-size:12px;margin:0 22px 28px;}
+#gs-control-proposal .gs-track {position:relative;height:48px;background:var(--gs-panel);border-radius:4px;margin:0 22px 28px;}
+#gs-control-proposal .gs-locked {position:absolute;inset:0 auto 0 0;width:41.6667%;background:repeating-linear-gradient(135deg,transparent 0px,transparent 6px,var(--gs-line) 6px,var(--gs-line) 7px);border-radius:4px 0 0 4px;}
+#gs-control-proposal .gs-block {position:absolute;height:48px;display:flex;align-items:center;justify-content:space-between;gap:2px;background:var(--gs-mark);border-radius:4px;left:66.6667%;width:33.3333%;}
+#gs-control-proposal .gs-handle {position:absolute;width:44px;height:44px;min-height:44px;background:var(--gs-panel);border:0;border-radius:4px;color:var(--gs-fg);font:500 18px/1 ui-monospace,SFMono-Regular,Consolas,monospace;touch-action:none;cursor:ew-resize;padding:0;}
+#gs-control-proposal .gs-start {left:0;top:-22px;transform:translateX(-50%);}
+#gs-control-proposal .gs-end {right:0;bottom:-22px;transform:translateX(50%);}
+#gs-control-proposal .gs-block-label {font-size:11px;overflow:hidden;margin:auto;}
+#gs-control-proposal .gs-time-fields,#gs-control-proposal .gs-tap-fields {display:flex;flex-wrap:wrap;gap:18px;align-items:center;margin-top:16px;}
+#gs-control-proposal label {display:flex;align-items:center;gap:8px;font-size:12px;color:var(--gs-muted);}
+#gs-control-proposal select {font:400 14px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;min-height:40px;background:var(--gs-panel);color:var(--gs-fg);border:1px solid var(--gs-line);border-radius:4px;padding:6px 10px;}
+#gs-control-proposal .gs-readout {font-size:12px;margin:15px 0 0;min-height:36px;}
+#gs-control-proposal .gs-mini {height:22px;background:var(--gs-panel);border-radius:4px;margin-top:24px;position:relative;}
+#gs-control-proposal .gs-mini-run {position:absolute;height:22px;background:var(--gs-mark);border-radius:4px;}
+@media(max-width:430px){#gs-control-proposal .gs-example{padding:16px;min-height:420px;}#gs-control-proposal .gs-top{padding-right:65px;}#gs-control-proposal h3 span{display:block;}#gs-control-proposal .gs-block-label{display:none;}#gs-control-proposal .gs-tap-fields{gap:12px;flex-direction:column;align-items:flex-start;}}
+</style>
+<script>
+(() => {
+  const root = document.getElementById('gs-control-proposal');
+  const time = h => `${String(h).padStart(2,'0')}:00`;
+  const saved = window.openai?.widgetState?.privateContent?.timings || {};
+  const restorers = [];
+  root.querySelectorAll('.gs-example').forEach(panel => {
+    const key = panel.dataset.example;
+    let start = Number(saved[key]?.start) || 16, end = Number(saved[key]?.end) || 20;
+    start = Math.max(13,Math.min(19,start)); end = Math.max(start+1,Math.min(20,end));
+    let drag = null;
+    const startSelect = panel.querySelector('.gs-start-select');
+    const endSelect = panel.querySelector('.gs-end-select');
+    const block = panel.querySelector('.gs-block') || panel.querySelector('.gs-mini-run');
+    const readout = panel.querySelector('.gs-readout');
+    const fill = (el,a,b,value) => {
+      el.replaceChildren(...Array.from({length:b-a+1},(_,i) => {const option=document.createElement('option');option.value=String(a+i);option.textContent=time(a+i);return option;}));
+      el.value=String(value);
+    };
+    function render() {
+      block.style.left=`${(start-8)/12*100}%`; block.style.width=`${(end-start)/12*100}%`;
+      fill(startSelect,13,end-1,start); fill(endSelect,start+1,20,end);
+      readout.textContent=`Scheduled ${time(start)}–${time(end)} · ${start === 13 ? 'Ready when the storm starts' : `Starts ${start-13}h after the storm begins`}`;
+    }
+    function remember() {
+      const timings={};
+      root.querySelectorAll('.gs-example').forEach(p=>{timings[p.dataset.example]={start:Number(p.querySelector('.gs-start-select').value),end:Number(p.querySelector('.gs-end-select').value)};});
+      window.openai?.setWidgetState?.({modelContent:{proposedCoalSchedules:timings},privateContent:{timings}})?.catch(()=>{});
+    }
+    startSelect.addEventListener('change',()=>{start=Number(startSelect.value);render();remember();});
+    endSelect.addEventListener('change',()=>{end=Number(endSelect.value);render();remember();});
+    panel.querySelectorAll('.gs-handle').forEach(handle=>{
+      const isStart=handle.classList.contains('gs-start');
+      handle.addEventListener('pointerdown',e=>{if(e.button!==0)return;drag={id:e.pointerId,before:{start,end}};handle.setPointerCapture(e.pointerId);});
+      handle.addEventListener('pointermove',e=>{
+        if(!drag||drag.id!==e.pointerId)return;
+        const r=panel.querySelector('.gs-track').getBoundingClientRect();
+        const hour=Math.round(8+(e.clientX-r.left)/r.width*12);
+        if(isStart)start=Math.max(13,Math.min(end-1,hour));else end=Math.max(start+1,Math.min(20,hour));
+        render();
+      });
+      handle.addEventListener('pointerup',e=>{if(!drag||drag.id!==e.pointerId)return;drag=null;remember();});
+      handle.addEventListener('pointercancel',()=>{if(drag){({start,end}=drag.before);drag=null;render();}});
+      handle.addEventListener('keydown',e=>{
+        if(!['ArrowLeft','ArrowRight'].includes(e.key))return;e.preventDefault();
+        const step=e.key==='ArrowLeft'?-1:1;
+        if(isStart)start=Math.max(13,Math.min(end-1,start+step));else end=Math.max(start+1,Math.min(20,end+step));
+        render();remember();
+      });
+    });
+    restorers.push(timings=>{const value=timings?.[key];if(value){start=Math.max(13,Math.min(19,Number(value.start)||16));end=Math.max(start+1,Math.min(20,Number(value.end)||20));render();}});
+    render();
+  });
+  window.addEventListener('openai:set_globals',event=>{const timings=event.detail?.globals?.widgetState?.privateContent?.timings;if(timings)restorers.forEach(restore=>restore(timings));});
+})();
+</script>
